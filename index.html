@@ -864,7 +864,7 @@ Atlanta Braves"></textarea>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   
   <script>
-    const SUPABASE_URL = "https://tawcoowxlzrukqegmnyb.supabase.co/rest/v1/";
+    const SUPABASE_URL = "https://tawcoowxlzrukqegmnyb.supabase.co";
     const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_o3f_vhxB1Oejx1bD3-LqfA_rTapWeD4";
     
     const supabaseClient = supabase.createClient(
@@ -889,7 +889,7 @@ Atlanta Braves"></textarea>
       { name: "NASCAR", group: "Professional", type: "Driver" }
     ];
 
-    const DEFAULT_OWNERS = ["Ethan", "Jake", "Sarah", "Mike"];
+    const DEFAULT_OWNERS = [];
 
     const SAMPLE_ENTRIES = [];
 
@@ -925,24 +925,26 @@ Atlanta Braves"></textarea>
       }
     });
 
-    const LEAGUES_KEY = "omniFantasyLeaguesV1";
-    let currentLeagueId = sessionStorage.getItem("omniFantasyCurrentLeague") || "";
-    let state = currentLeagueId ? loadState() : defaultState();
+    let currentLeagueId = "";
+    let state = defaultState();
     const SESSION_ID = crypto.randomUUID();
     let timerInterval = null;
     let heartbeatInterval = null;
+    let leagueSearchRequest = 0;
 
-    function getLeagues() {
-      try { return JSON.parse(localStorage.getItem(LEAGUES_KEY) || "[]"); }
-      catch { return []; }
-    }
-
-    function saveLeagues(leagues) {
-      localStorage.setItem(LEAGUES_KEY, JSON.stringify(leagues));
+    function getStoredSession() {
+      try {
+        return JSON.parse(localStorage.getItem("omniSession") || "null");
+      } catch {
+        return null;
+      }
     }
 
     function getCurrentLeague() {
-      return getLeagues().find(league => league.id === currentLeagueId) || null;
+      const session = getStoredSession();
+      return session && session.leagueId === currentLeagueId
+        ? { id: session.leagueId, name: session.leagueName, commissioner: state?.commissioner || "" }
+        : null;
     }
 
     function stateKey() { return `omniFantasyStateV3:${currentLeagueId}`; }
@@ -957,7 +959,7 @@ Atlanta Braves"></textarea>
         loaded.timerSettings ||= { manualSeconds: 30, autoSeconds: 10 };
         loaded.timerSettings.manualSeconds = Number(loaded.timerSettings.manualSeconds) || 30;
         loaded.timerSettings.autoSeconds = Number(loaded.timerSettings.autoSeconds) || 10;
-        loaded.signedInOwner = sessionStorage.getItem("omniFantasySignedInOwner") || "";
+        loaded.signedInOwner = getStoredSession()?.playerName || "";
         loaded.pickDeadline ||= null;
         return loaded;
       } catch {
@@ -969,163 +971,211 @@ Atlanta Braves"></textarea>
       const persistent = structuredClone(state);
       delete persistent.signedInOwner;
       if (currentLeagueId) localStorage.setItem(stateKey(), JSON.stringify(persistent));
-      if (state.signedInOwner) sessionStorage.setItem("omniFantasySignedInOwner", state.signedInOwner);
-      else sessionStorage.removeItem("omniFantasySignedInOwner");
     }
 
-    function showLeagueGate() {
+    async function showLeagueGate() {
       document.getElementById("leagueGate").hidden = false;
       document.querySelector(".app-shell").hidden = true;
-      renderLeagueSearch();
+      await renderLeagueSearch();
     }
 
-    function enterLeague(league, owner) {
-      currentLeagueId = league.id;
-      sessionStorage.setItem("omniFantasyCurrentLeague", currentLeagueId);
+    async function enterLeagueFromSession(session) {
+      if (!session?.leagueId || !session?.playerId || !session?.sessionToken) {
+        await showLeagueGate();
+        return;
+      }
+
+      currentLeagueId = session.leagueId;
       state = loadState();
-      if (!state.owners?.length) state.owners = [...league.owners];
-      if (!state.commissioner) state.commissioner = league.commissioner;
+
+      const players = await getLeaguePlayers(currentLeagueId);
+      state.owners = players.map(player => player.display_name);
+      const commissioner = players.find(player => player.is_commissioner);
+      state.commissioner = commissioner?.display_name || "";
+      state.signedInOwner = session.playerName;
+      state.favorites[state.signedInOwner] ||= [];
+
       document.getElementById("leagueGate").hidden = true;
       document.querySelector(".app-shell").hidden = false;
       populateSelects();
-      if (owner) signIn(owner); else renderAll();
+      renderAll();
+      startHeartbeat();
     }
 
-    function leaveLeague() {
-      signOut();
-      currentLeagueId = "";
-      sessionStorage.removeItem("omniFantasyCurrentLeague");
-      state = defaultState();
-      showLeagueGate();
-    }
-
-    function renderLeagueSearch() {
-      const query = (document.getElementById("leagueSearchInput")?.value || "").trim().toLowerCase();
+    async function renderLeagueSearch() {
+      const query = (document.getElementById("leagueSearchInput")?.value || "").trim();
       const results = document.getElementById("leagueSearchResults");
       if (!results) return;
-      const leagues = getLeagues().filter(league => !query || league.name.toLowerCase().includes(query));
-      if (!leagues.length) {
-        results.innerHTML = '<div class="league-empty">No matching leagues found.</div>';
-        return;
+
+      const requestId = ++leagueSearchRequest;
+      results.innerHTML = '<div class="league-empty">Searching leagues...</div>';
+
+      try {
+        const leagues = await searchLeagues(query);
+        if (requestId !== leagueSearchRequest) return;
+
+        if (!leagues?.length) {
+          results.innerHTML = '<div class="league-empty">No matching leagues found.</div>';
+          return;
+        }
+
+        results.innerHTML = leagues.map(league => `
+          <div class="league-result" data-league-id="${league.league_id}">
+            <div class="league-result-top">
+              <div>
+                <strong>${escapeHtml(league.league_name)}</strong><br>
+                <small>${league.player_count} players · Commissioner: ${escapeHtml(league.commissioner_name || "—")}</small>
+              </div>
+            </div>
+            <div class="league-join-controls">
+              <select class="join-owner" aria-label="Join as player" disabled>
+                <option>Loading players...</option>
+              </select>
+              <input class="join-password" type="password" placeholder="League password" aria-label="League password" />
+              <button class="btn btn-primary join-league" type="button" disabled>Join As</button>
+            </div>
+          </div>`).join("");
+
+        await Promise.all([...results.querySelectorAll(".league-result")].map(async card => {
+          try {
+            const players = await getLeaguePlayers(card.dataset.leagueId);
+            const select = card.querySelector(".join-owner");
+            const button = card.querySelector(".join-league");
+            select.innerHTML = players.map(player => `
+              <option value="${player.player_id}" ${player.is_signed_in ? "disabled" : ""}>
+                ${escapeHtml(player.display_name)}${player.is_commissioner ? " (Commissioner)" : ""}${player.is_signed_in ? " — signed in" : ""}
+              </option>`).join("") || '<option value="">No players available</option>';
+            select.disabled = players.length === 0;
+            button.disabled = players.length === 0;
+          } catch (error) {
+            console.error(error);
+            card.querySelector(".join-owner").innerHTML = '<option value="">Could not load players</option>';
+          }
+        }));
+
+        results.querySelectorAll(".join-league").forEach(button => {
+          button.addEventListener("click", async () => {
+            const card = button.closest(".league-result");
+            const playerId = card.querySelector(".join-owner").value;
+            const password = card.querySelector(".join-password").value;
+            if (!playerId) return toast("Choose an available player.", "error");
+            if (!password) return toast("Enter the league password.", "error");
+
+            button.disabled = true;
+            button.textContent = "Joining...";
+            try {
+              const data = await joinLeague(card.dataset.leagueId, playerId, password);
+              await enterLeagueFromSession(getStoredSession());
+              toast(`Joined ${data.league.name} as ${data.player.display_name}.`);
+            } catch (error) {
+              toast(error.message || "Unable to join league.", "error");
+              button.disabled = false;
+              button.textContent = "Join As";
+              await renderLeagueSearch();
+            }
+          });
+        });
+      } catch (error) {
+        console.error(error);
+        results.innerHTML = `<div class="league-empty">Could not search leagues: ${escapeHtml(error.message || "Unknown error")}</div>`;
       }
-      results.innerHTML = leagues.map(league => `
-        <div class="league-result" data-league-id="${league.id}">
-          <div class="league-result-top">
-            <div><strong>${escapeHtml(league.name)}</strong><br><small>${league.owners.length} players · Commissioner: ${escapeHtml(league.commissioner)}</small></div>
-          </div>
-          <div class="league-join-controls">
-            <select class="join-owner" aria-label="Join as player">
-              ${league.owners.map(owner => `<option value="${escapeHtml(owner)}">${escapeHtml(owner)}</option>`).join("")}
-            </select>
-            <input class="join-password" type="password" placeholder="League password" aria-label="League password" />
-            <button class="btn btn-primary join-league" type="button">Join As</button>
-          </div>
-        </div>`).join("");
-      results.querySelectorAll(".join-league").forEach(button => button.addEventListener("click", () => {
-        const card = button.closest(".league-result");
-        const league = getLeagues().find(item => item.id === card.dataset.leagueId);
-        const owner = card.querySelector(".join-owner").value;
-        const password = card.querySelector(".join-password").value;
-        if (!league || password !== league.password) return toast("Incorrect league password.", "error");
-        const oldLeagueId = currentLeagueId;
-        currentLeagueId = league.id;
-        if (isOwnerSignedIn(owner)) { currentLeagueId = oldLeagueId; return toast(`${owner} is already signed in.`, "error"); }
-        currentLeagueId = oldLeagueId;
-        enterLeague(league, owner);
-      }));
     }
 
-    async function createLeagueInSupabase(
-        leagueName,
-        password,
-        commissionerName,
-        players
-    ) {
-        const { data, error } = await supabaseClient.rpc(
-            "create_omni_league",
-            {
-                p_league_name: leagueName,
-                p_password: password,
-                p_commissioner_name: commissionerName,
-                p_players: players
-            }
-        );
-    
-        if (error) {
-            console.error(error);
-            throw new Error(error.message);
-        }
-    
-        return data;
+    async function createLeague() {
+      const leagueName = document.getElementById("createLeagueName").value.trim();
+      const password = document.getElementById("createLeaguePassword").value;
+      const commissionerName = document.getElementById("createCommissionerName").value.trim();
+      const players = document.getElementById("createLeaguePlayers").value
+        .split(/\r?\n/)
+        .map(name => name.trim())
+        .filter(Boolean);
+      const button = document.getElementById("createLeagueButton");
+
+      if (!leagueName || !password || !commissionerName) {
+        toast("League name, password, and commissioner name are required.", "error");
+        return;
+      }
+
+      button.disabled = true;
+      button.textContent = "Creating...";
+
+      try {
+        const data = await createLeagueInSupabase(leagueName, password, commissionerName, players);
+        localStorage.setItem("omniSession", JSON.stringify({
+          leagueId: data.league.id,
+          leagueName: data.league.name,
+          playerId: data.player.id,
+          playerName: data.player.display_name,
+          isCommissioner: data.player.is_commissioner,
+          sessionToken: data.session_token
+        }));
+
+        currentLeagueId = data.league.id;
+        state = defaultState();
+        state.signedInOwner = data.player.display_name;
+        state.commissioner = data.player.display_name;
+        saveState();
+
+        document.getElementById("createLeagueName").value = "";
+        document.getElementById("createLeaguePassword").value = "";
+        document.getElementById("createCommissionerName").value = "";
+        document.getElementById("createLeaguePlayers").value = "";
+
+        await enterLeagueFromSession(getStoredSession());
+        toast(`${data.league.name} was created.`);
+      } catch (error) {
+        console.error(error);
+        toast(error.message || "Unable to create league.", "error");
+      } finally {
+        button.disabled = false;
+        button.textContent = "Create League";
+      }
+    }
+
+    async function createLeagueInSupabase(leagueName, password, commissionerName, players) {
+      const { data, error } = await supabaseClient.rpc("create_omni_league", {
+        p_league_name: leagueName,
+        p_password: password,
+        p_commissioner_name: commissionerName,
+        p_players: players
+      });
+      if (error) throw new Error(error.message);
+      return data;
     }
 
     async function searchLeagues(searchText) {
-        const { data, error } = await supabaseClient.rpc(
-            "search_omni_leagues",
-            {
-                p_search: searchText
-            }
-        );
-    
-        if (error) {
-            console.error(error);
-            throw new Error(error.message);
-        }
-    
-        return data;
+      const { data, error } = await supabaseClient.rpc("search_omni_leagues", {
+        p_search: searchText
+      });
+      if (error) throw new Error(error.message);
+      return data;
     }
 
     async function getLeaguePlayers(leagueId) {
-        const { data, error } = await supabaseClient.rpc(
-            "get_omni_league_players",
-            {
-                p_league_id: leagueId
-            }
-        );
-    
-        if (error) {
-            console.error(error);
-            throw new Error(error.message);
-        }
-    
-        return data;
+      const { data, error } = await supabaseClient.rpc("get_omni_league_players", {
+        p_league_id: leagueId
+      });
+      if (error) throw new Error(error.message);
+      return data;
     }
 
-    async function joinLeague(
-        leagueId,
-        playerId,
-        password
-    ) {
-        const { data, error } = await supabaseClient.rpc(
-            "join_omni_league",
-            {
-                p_league_id: leagueId,
-                p_player_id: playerId,
-                p_password: password
-            }
-        );
-    
-        if (error) {
-            console.error(error);
-            throw new Error(error.message);
-        }
-    
-        localStorage.setItem(
-            "omniSession",
-            JSON.stringify({
-                leagueId: data.league.id,
-                leagueName: data.league.name,
-    
-                playerId: data.player.id,
-                playerName: data.player.display_name,
-    
-                isCommissioner: data.player.is_commissioner,
-    
-                sessionToken: data.session_token
-            })
-        );
-    
-        return data;
+    async function joinLeague(leagueId, playerId, password) {
+      const { data, error } = await supabaseClient.rpc("join_omni_league", {
+        p_league_id: leagueId,
+        p_player_id: playerId,
+        p_password: password
+      });
+      if (error) throw new Error(error.message);
+
+      localStorage.setItem("omniSession", JSON.stringify({
+        leagueId: data.league.id,
+        leagueName: data.league.name,
+        playerId: data.player.id,
+        playerName: data.player.display_name,
+        isCommissioner: data.player.is_commissioner,
+        sessionToken: data.session_token
+      }));
+      return data;
     }
 
     function readPresence() {
@@ -1187,58 +1237,46 @@ Atlanta Braves"></textarea>
     }
 
     function startHeartbeat() {
-        const session = JSON.parse(
-            localStorage.getItem("omniSession")
-        );
-    
-        if (!session) return;
-    
-        heartbeatInterval = setInterval(
-            async () => {
-                const { data, error } =
-                    await supabaseClient.rpc(
-                        "omni_session_heartbeat",
-                        {
-                            p_player_id: session.playerId,
-                            p_session_token:
-                                session.sessionToken
-                        }
-                    );
-    
-                if (error || data !== true) {
-                    console.error(
-                        "Session heartbeat failed.",
-                        error
-                    );
-                }
-            },
-            15000
-        );
+      if (heartbeatInterval) clearInterval(heartbeatInterval);
+      const session = getStoredSession();
+      if (!session) return;
+
+      const beat = async () => {
+        const { data, error } = await supabaseClient.rpc("omni_session_heartbeat", {
+          p_player_id: session.playerId,
+          p_session_token: session.sessionToken
+        });
+        if (error || data !== true) {
+          console.error("Session heartbeat failed.", error);
+        }
+      };
+
+      beat();
+      heartbeatInterval = setInterval(beat, 15000);
     }
 
     async function leaveLeague() {
-        const session = JSON.parse(
-            localStorage.getItem("omniSession")
-        );
-    
-        if (session) {
-            await supabaseClient.rpc(
-                "leave_omni_league",
-                {
-                    p_player_id: session.playerId,
-                    p_session_token:
-                        session.sessionToken
-                }
-            );
+      const session = getStoredSession();
+      if (session) {
+        try {
+          await supabaseClient.rpc("leave_omni_league", {
+            p_player_id: session.playerId,
+            p_session_token: session.sessionToken
+          });
+        } catch (error) {
+          console.error("Sign-out request failed:", error);
         }
-    
-        if (heartbeatInterval) {
-            clearInterval(heartbeatInterval);
-        }
-    
-        localStorage.removeItem("omniSession");
-    
-        location.reload();
+      }
+
+      if (heartbeatInterval) {
+        clearInterval(heartbeatInterval);
+        heartbeatInterval = null;
+      }
+
+      localStorage.removeItem("omniSession");
+      currentLeagueId = "";
+      state = defaultState();
+      await showLeagueGate();
     }
 
     function getPickSeconds() {
@@ -1409,7 +1447,7 @@ Atlanta Braves"></textarea>
 
       const required = Number(state.rosterRequirements[state.activeDraft][entry.sport] || 0);
       const sportCount = getOwnerSportCount(owner, entry.sport);
-      if (sportCount >= 2) return { allowed: false, reason: `${owner} already has two entries in ${entry.sport}.` };
+      if (sportCount >= 3) return { allowed: false, reason: `${owner} already has three entries in ${entry.sport}.` };
       const flexUsed = getOwnerFlexUsed(owner);
       const flexMax = Number(state.flexCounts[state.activeDraft] || 0);
 
@@ -1854,12 +1892,8 @@ Atlanta Braves"></textarea>
     }
 
     function syncLeagueOwners() {
-      const leagues = getLeagues();
-      const league = leagues.find(item => item.id === currentLeagueId);
-      if (!league) return;
-      league.owners = [...state.owners];
-      league.commissioner = state.commissioner || league.commissioner;
-      saveLeagues(leagues);
+      // Step 3C keeps draft-board state local. Player/commissioner mutations
+      // will be moved to Supabase in the next database integration step.
     }
 
     function requireCommissioner() {
@@ -2107,8 +2141,8 @@ Atlanta Braves"></textarea>
       renderAll();
     });
 
-    document.getElementById("signInButton").addEventListener("click", () => signIn(document.getElementById("signInOwner").value));
-    document.getElementById("signOutButton").addEventListener("click", signOut);
+    document.getElementById("signInButton").addEventListener("click", () => toast("Leave the league first, then use Join As to switch players.", "error"));
+    document.getElementById("signOutButton").addEventListener("click", leaveLeague);
     document.getElementById("openAddEntry").addEventListener("click", openEntryDialog);
     document.getElementById("closeEntryDialog").addEventListener("click", () => document.getElementById("entryDialog").close());
     document.getElementById("cancelEntry").addEventListener("click", () => document.getElementById("entryDialog").close());
@@ -2245,30 +2279,34 @@ Atlanta Braves"></textarea>
     });
     window.addEventListener("storage", () => {
       if (currentLeagueId) renderAll();
-      else renderLeagueSearch();
     });
 
-    if (currentLeagueId && getCurrentLeague()) {
-      document.getElementById("leagueGate").hidden = true;
-      document.querySelector(".app-shell").hidden = false;
-      if (state.signedInOwner) {
-        const presence = cleanPresence();
-        if (!presence[state.signedInOwner] || presence[state.signedInOwner].sessionId === SESSION_ID) {
-          presence[state.signedInOwner] = { sessionId: SESSION_ID, timestamp: Date.now() };
-          writePresence(presence);
-          startHeartbeat();
+    async function initializeOmni() {
+      const session = getStoredSession();
+      if (session) {
+        const { data, error } = await supabaseClient.rpc("valid_omni_session", {
+          p_player_id: session.playerId,
+          p_session_token: session.sessionToken
+        });
+
+        if (!error && data === true) {
+          try {
+            await enterLeagueFromSession(session);
+          } catch (loadError) {
+            console.error(loadError);
+            localStorage.removeItem("omniSession");
+            await showLeagueGate();
+          }
         } else {
-          state.signedInOwner = "";
-          saveState();
+          localStorage.removeItem("omniSession");
+          await showLeagueGate();
         }
+      } else {
+        await showLeagueGate();
       }
-      populateSelects();
-      renderAll();
-    } else {
-      currentLeagueId = "";
-      sessionStorage.removeItem("omniFantasyCurrentLeague");
-      showLeagueGate();
     }
+
+    initializeOmni();
     startTimerLoop();
   </script>
 </body>
