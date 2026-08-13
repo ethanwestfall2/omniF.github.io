@@ -797,8 +797,20 @@
 
                 <div>
                   <label>Sport roster limits</label>
-                  <div id="sportLimitControls" style="display:grid;gap:8px;margin-top:8px"></div>
-                  <button class="btn" id="saveSportLimits" type="button" style="margin-top:8px">Save Sport Limits</button>
+                  <div style="display:grid;gap:8px;margin-top:8px">
+                    <select id="sportLimitSelect" aria-label="Sport to edit"></select>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+                      <div>
+                        <label for="sportRequiredInput">Required</label>
+                        <input id="sportRequiredInput" type="number" min="0" max="10" />
+                      </div>
+                      <div>
+                        <label for="sportMaxInput">Maximum</label>
+                        <input id="sportMaxInput" type="number" min="1" max="10" />
+                      </div>
+                    </div>
+                    <button class="btn" id="saveSportLimits" type="button">Save Sport Limit</button>
+                  </div>
                 </div>
 
                 <div class="button-grid">
@@ -810,6 +822,7 @@
 
                 <button class="btn" id="exportDraft">Export Draft Results</button>
                 <button class="btn btn-ghost" id="clearAllTeams">Clear All Teams</button>
+                <button class="btn btn-danger" id="deleteLeagueButton">Delete League</button>
               </div>
             </div>
           </div>
@@ -2551,49 +2564,70 @@ Atlanta Braves"></textarea>
     }
 
     function renderSportLimitControls() {
-      const container = document.getElementById("sportLimitControls");
-      if (!container) return;
-      container.innerHTML = (SPORTS || []).map(def => {
-        const sport = remoteSportByName[def.name];
-        if (!sport) return "";
-        return `
-          <div style="display:grid;grid-template-columns:1fr 78px 78px;gap:8px;align-items:center">
-            <span>${escapeHtml(def.name)}</span>
-            <input class="sport-required-input" data-sport-id="${sport.id}" type="number" min="0" max="10"
-              value="${Number(sport.required_count) || 0}" title="Required" aria-label="${escapeHtml(def.name)} required">
-            <input class="sport-max-input" data-sport-id="${sport.id}" type="number" min="1" max="10"
-              value="${Number(sport.max_count) || 1}" title="Maximum" aria-label="${escapeHtml(def.name)} maximum">
-          </div>`;
-      }).join("");
-      if (container.innerHTML) {
-        container.insertAdjacentHTML("afterbegin",
-          '<div style="display:grid;grid-template-columns:1fr 78px 78px;gap:8px;color:var(--muted);font-size:.75rem"><span>Sport</span><span>Required</span><span>Maximum</span></div>'
-        );
+      const select = document.getElementById("sportLimitSelect");
+      const requiredInput = document.getElementById("sportRequiredInput");
+      const maxInput = document.getElementById("sportMaxInput");
+      if (!select || !requiredInput || !maxInput) return;
+
+      const previous = select.value;
+      const configured = (SPORTS || [])
+        .map(def => remoteSportByName[def.name])
+        .filter(Boolean);
+
+      select.innerHTML = configured.map(sport =>
+        `<option value="${sport.id}">${escapeHtml(sport.name)}</option>`
+      ).join("");
+
+      if (configured.some(s => s.id === previous)) {
+        select.value = previous;
       }
+
+      updateSportLimitEditor();
+    }
+
+    function updateSportLimitEditor() {
+      const select = document.getElementById("sportLimitSelect");
+      const requiredInput = document.getElementById("sportRequiredInput");
+      const maxInput = document.getElementById("sportMaxInput");
+      if (!select || !requiredInput || !maxInput) return;
+
+      const sport = Object.values(remoteSportByName || {})
+        .find(item => item.id === select.value);
+
+      if (!sport) {
+        requiredInput.value = "";
+        maxInput.value = "";
+        return;
+      }
+
+      requiredInput.value = Number(sport.required_count) || 0;
+      maxInput.value = Number(sport.max_count) || 1;
     }
 
     async function saveSportLimits() {
       if (!requireCommissioner()) return;
-      const session = sessionInfo();
-      const requiredInputs = [...document.querySelectorAll(".sport-required-input")];
-      const maxInputs = [...document.querySelectorAll(".sport-max-input")];
-      const maxById = new Map(maxInputs.map(input => [input.dataset.sportId, Number(input.value)]));
 
-      for (const input of requiredInputs) {
-        const sportId = input.dataset.sportId;
-        const required = Math.max(0, Number(input.value) || 0);
-        const max = Math.max(1, maxById.get(sportId) || 1);
-        const { error } = await supabaseClient.rpc("update_omni_sport_limit", {
-          p_player_id: session.playerId,
-          p_session_token: session.sessionToken,
-          p_sport_id: sportId,
-          p_required_count: required,
-          p_max_count: max
-        });
-        if (error) return toast(error.message, "error");
+      const session = sessionInfo();
+      const sportId = document.getElementById("sportLimitSelect").value;
+      const required = Math.max(0, Number(document.getElementById("sportRequiredInput").value) || 0);
+      const max = Math.max(1, Number(document.getElementById("sportMaxInput").value) || 1);
+
+      if (max < required) {
+        return toast("Maximum cannot be less than required.", "error");
       }
+
+      const { error } = await supabaseClient.rpc("update_omni_sport_limit", {
+        p_player_id: session.playerId,
+        p_session_token: session.sessionToken,
+        p_sport_id: sportId,
+        p_required_count: required,
+        p_max_count: max
+      });
+
+      if (error) return toast(error.message, "error");
+
       await refreshSharedState(true);
-      toast("Sport limits saved.");
+      toast("Sport limit saved.");
     }
 
     function getOwnerFlexUsed(owner, group = state.activeDraft) {
@@ -2771,6 +2805,39 @@ Atlanta Braves"></textarea>
       toast("All teams and competitors were removed.");
     }
 
+    async function deleteLeagueRemote() {
+      if (!requireCommissioner()) return;
+
+      const session = sessionInfo();
+      const leagueName = session?.leagueName || "this league";
+      const password = prompt(
+        `Enter the league password to permanently delete "${leagueName}".`
+      );
+
+      if (password === null) return;
+      if (!password) return toast("League password is required.", "error");
+
+      const confirmed = confirm(
+        `Permanently delete "${leagueName}"? This removes all players, teams, favorites, drafts, and picks. This cannot be undone.`
+      );
+      if (!confirmed) return;
+
+      const { data, error } = await supabaseClient.rpc("delete_omni_league", {
+        p_player_id: session.playerId,
+        p_session_token: session.sessionToken,
+        p_password: password
+      });
+
+      if (error) return toast(error.message, "error");
+      if (data !== true) return toast("League could not be deleted.", "error");
+
+      if (heartbeatInterval) clearInterval(heartbeatInterval);
+      localStorage.removeItem("omniSession");
+      sessionStorage.removeItem("omniFantasyCurrentLeague");
+      sessionStorage.removeItem("omniFantasySignedInOwner");
+      location.reload();
+    }
+
     function syncCommissionerControls() {
       document.getElementById("collegeFlexInput").value = state.flexCounts.College;
       document.getElementById("professionalFlexInput").value = state.flexCounts.Professional;
@@ -2788,7 +2855,7 @@ Atlanta Braves"></textarea>
 
       ["commissionerOwner","manualDraftSeconds","autoDraftSeconds","newPlayerName","addPlayer","removePlayerSelect",
        "removePlayer","collegeFlexInput","professionalFlexInput","startDraft","pauseDraft","advancePick","resetDraft",
-       "clearAllTeams","saveSportLimits"].forEach(id => {
+       "clearAllTeams","saveSportLimits","sportLimitSelect","sportRequiredInput","sportMaxInput","deleteLeagueButton"].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.disabled = !isCommissioner;
       });
@@ -2857,6 +2924,7 @@ Atlanta Braves"></textarea>
       document.getElementById(id).addEventListener("change", saveLeagueSettings);
     });
     document.getElementById("saveSportLimits").addEventListener("click", saveSportLimits);
+    document.getElementById("sportLimitSelect").addEventListener("change", updateSportLimitEditor);
 
     document.getElementById("signInButton").addEventListener("click", () =>
       toast("Leave the league first, then use Join As to switch players.", "error")
@@ -2899,6 +2967,7 @@ Atlanta Braves"></textarea>
     );
 
     document.getElementById("clearAllTeams").addEventListener("click", clearAllTeamsRemote);
+    document.getElementById("deleteLeagueButton").addEventListener("click", deleteLeagueRemote);
 
     window.addEventListener("focus", () => refreshSharedState(true));
 
