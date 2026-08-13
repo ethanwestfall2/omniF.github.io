@@ -615,6 +615,7 @@
 
       <div class="status-wrap">
         <span id="leagueNamePill" class="pill">No League</span>
+        <span id="realtimePill" class="pill">↻ Connecting</span>
         <span id="draftStatusPill" class="pill paused">● Draft Paused</span>
         <span id="activeDraftPill" class="pill">Professional Draft</span>
         <span id="commissionerPill" class="pill">No Commissioner</span>
@@ -2136,6 +2137,8 @@ Atlanta Braves"></textarea>
     // ============================================================
 
     let sharedRefreshInterval = null;
+    let realtimeChannel = null;
+    let realtimeRefreshTimer = null;
     let remoteSignedInOwners = new Set();
     let remotePlayerByName = {};
     let remotePlayerById = {};
@@ -2360,9 +2363,71 @@ Atlanta Braves"></textarea>
       }
     }
 
+    function setRealtimeStatus(text, mode = "") {
+      const pill = document.getElementById("realtimePill");
+      if (!pill) return;
+      pill.textContent = text;
+      pill.className = `pill ${mode}`.trim();
+    }
+
+    function scheduleRealtimeRefresh() {
+      clearTimeout(realtimeRefreshTimer);
+      realtimeRefreshTimer = setTimeout(() => {
+        refreshSharedState(true);
+      }, 75);
+    }
+
+    async function stopRealtimeSync() {
+      clearTimeout(realtimeRefreshTimer);
+      realtimeRefreshTimer = null;
+
+      if (realtimeChannel) {
+        try {
+          await supabaseClient.removeChannel(realtimeChannel);
+        } catch (error) {
+          console.warn("Could not remove realtime channel:", error);
+        }
+        realtimeChannel = null;
+      }
+    }
+
+    async function startRealtimeSync() {
+      const session = sessionInfo();
+      if (!session?.leagueId) return;
+
+      await stopRealtimeSync();
+      setRealtimeStatus("↻ Connecting");
+
+      realtimeChannel = supabaseClient
+        .channel(`omni-league-${session.leagueId}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "*",
+            schema: "public",
+            table: "league_realtime_events",
+            filter: `league_id=eq.${session.leagueId}`
+          },
+          () => scheduleRealtimeRefresh()
+        )
+        .subscribe((status, error) => {
+          if (status === "SUBSCRIBED") {
+            setRealtimeStatus("● Live", "active");
+          } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+            console.error("Realtime connection problem:", error);
+            setRealtimeStatus("● Reconnecting", "paused");
+          } else if (status === "CLOSED") {
+            setRealtimeStatus("● Offline", "paused");
+          }
+        });
+    }
+
     function startSharedRefresh() {
+      // Realtime is the primary sync path. This slower polling loop is only
+      // a safety net for background tabs, sleeping devices, or a dropped socket.
       clearInterval(sharedRefreshInterval);
-      sharedRefreshInterval = setInterval(() => refreshSharedState(false), 1500);
+      sharedRefreshInterval = setInterval(() => refreshSharedState(false), 15000);
+      startRealtimeSync();
     }
 
     async function enterLeagueFromSession(session) {
@@ -2393,6 +2458,7 @@ Atlanta Braves"></textarea>
       }
       if (heartbeatInterval) clearInterval(heartbeatInterval);
       if (sharedRefreshInterval) clearInterval(sharedRefreshInterval);
+      await stopRealtimeSync();
       localStorage.removeItem("omniSession");
       currentLeagueId = "";
       state = defaultState();
@@ -2969,7 +3035,28 @@ Atlanta Braves"></textarea>
     document.getElementById("clearAllTeams").addEventListener("click", clearAllTeamsRemote);
     document.getElementById("deleteLeagueButton").addEventListener("click", deleteLeagueRemote);
 
-    window.addEventListener("focus", () => refreshSharedState(true));
+    window.addEventListener("focus", () => {
+      refreshSharedState(true);
+      if (sessionInfo() && !realtimeChannel) startRealtimeSync();
+    });
+
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible" && sessionInfo()) {
+        refreshSharedState(true);
+        startRealtimeSync();
+      }
+    });
+
+    window.addEventListener("online", () => {
+      if (sessionInfo()) {
+        refreshSharedState(true);
+        startRealtimeSync();
+      }
+    });
+
+    window.addEventListener("offline", () => {
+      setRealtimeStatus("● Offline", "paused");
+    });
 
 
     async function initializeOmni() {
