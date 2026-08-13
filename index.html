@@ -861,7 +861,17 @@ Atlanta Braves"></textarea>
 
   <div id="toastContainer" class="toast-container"></div>
 
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  
   <script>
+    const SUPABASE_URL = "https://tawcoowxlzrukqegmnyb.supabase.co/rest/v1/";
+    const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_o3f_vhxB1Oejx1bD3-LqfA_rTapWeD4";
+    
+    const supabaseClient = supabase.createClient(
+        SUPABASE_URL,
+        SUPABASE_PUBLISHABLE_KEY
+    );
+    
     const SPORTS = [
       { name: "MLB", group: "Professional", type: "Team" },
       { name: "College Soccer", group: "College", type: "Team" },
@@ -1025,26 +1035,28 @@ Atlanta Braves"></textarea>
       }));
     }
 
-    function createLeague() {
-      const name = document.getElementById("createLeagueName").value.trim();
-      const password = document.getElementById("createLeaguePassword").value;
-      const commissioner = document.getElementById("createCommissionerName").value.trim();
-      const listedPlayers = document.getElementById("createLeaguePlayers").value.split(/\r?\n/).map(v => v.trim()).filter(Boolean);
-      if (!name || !password || !commissioner) return toast("League name, password, and commissioner name are required.", "error");
-      const leagues = getLeagues();
-      if (leagues.some(league => league.name.toLowerCase() === name.toLowerCase())) return toast("A league with that name already exists.", "error");
-      const owners = [...new Map([commissioner, ...listedPlayers].map(owner => [owner.toLowerCase(), owner])).values()];
-      const league = { id: crypto.randomUUID(), name, password, commissioner, owners, createdAt: Date.now() };
-      leagues.push(league);
-      saveLeagues(leagues);
-      currentLeagueId = league.id;
-      const initial = defaultState();
-      initial.owners = [...owners];
-      initial.commissioner = commissioner;
-      localStorage.setItem(stateKey(), JSON.stringify(initial));
-      currentLeagueId = "";
-      enterLeague(league, commissioner);
-      toast(`${name} created. You are the commissioner.`);
+    async function createLeagueInSupabase(
+        leagueName,
+        password,
+        commissionerName,
+        players
+    ) {
+        const { data, error } = await supabaseClient.rpc(
+            "create_omni_league",
+            {
+                p_league_name: leagueName,
+                p_password: password,
+                p_commissioner_name: commissionerName,
+                p_players: players
+            }
+        );
+    
+        if (error) {
+            console.error(error);
+            throw new Error(error.message);
+        }
+    
+        return data;
     }
 
     function readPresence() {
