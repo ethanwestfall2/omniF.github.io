@@ -794,6 +794,13 @@
                   <input id="professionalFlexInput" type="number" min="0" max="10" />
                 </div>
 
+
+                <div>
+                  <label>Sport roster limits</label>
+                  <div id="sportLimitControls" style="display:grid;gap:8px;margin-top:8px"></div>
+                  <button class="btn" id="saveSportLimits" type="button" style="margin-top:8px">Save Sport Limits</button>
+                </div>
+
                 <div class="button-grid">
                   <button class="btn btn-success" id="startDraft">Start</button>
                   <button class="btn btn-warning" id="pauseDraft">Pause</button>
@@ -2110,9 +2117,728 @@ Atlanta Braves"></textarea>
     }
 
 
+
+    // ============================================================
+    // STEP 3D-2: SHARED SUPABASE STATE
+    // ============================================================
+
+    let sharedRefreshInterval = null;
+    let remoteSignedInOwners = new Set();
+    let remotePlayerByName = {};
+    let remotePlayerById = {};
+    let remoteSportByName = {};
+    let remoteSportById = {};
+    let remoteDraftByGroup = {};
+    let autoDraftInFlight = false;
+    let sharedRefreshInFlight = false;
+    let lastSharedSignature = "";
+
+    function sessionInfo() {
+      return getStoredSession();
+    }
+
+    function saveState() {
+      // Shared league/draft state now lives in Supabase.
+      // localStorage is used only for the current browser session.
+    }
+
+    function loadState() {
+      const loaded = defaultState();
+      loaded.signedInOwner = getStoredSession()?.playerName || "";
+      loaded.sportMaximums = {
+        Professional: Object.fromEntries(SPORTS.filter(s => s.group === "Professional").map(s => [s.name, 3])),
+        College: Object.fromEntries(SPORTS.filter(s => s.group === "College").map(s => [s.name, 3]))
+      };
+      return loaded;
+    }
+
+    function isOwnerSignedIn(owner) {
+      return remoteSignedInOwners.has(owner);
+    }
+
+    function readPresence() {
+      return Object.fromEntries([...remoteSignedInOwners].map(name => [name, { remote: true }]));
+    }
+
+    function writePresence() {}
+    function cleanPresence() { return readPresence(); }
+
+    async function fetchSharedLeagueState() {
+      const session = sessionInfo();
+      if (!session) throw new Error("No active Omni session.");
+
+      const [{ data, error }, players] = await Promise.all([
+        supabaseClient.rpc("get_omni_league_state", {
+          p_player_id: session.playerId,
+          p_session_token: session.sessionToken
+        }),
+        getLeaguePlayers(session.leagueId)
+      ]);
+
+      if (error) throw new Error(error.message);
+      return { data, players };
+    }
+
+    function applySharedLeagueState(payload, playersPresence) {
+      const session = sessionInfo();
+      if (!session || !payload) return;
+
+      currentLeagueId = payload.league.id;
+      remoteSignedInOwners = new Set(
+        (playersPresence || []).filter(p => p.is_signed_in).map(p => p.display_name)
+      );
+
+      remotePlayerByName = {};
+      remotePlayerById = {};
+      (payload.players || []).forEach(player => {
+        remotePlayerByName[player.display_name] = player;
+        remotePlayerById[player.id] = player;
+      });
+
+      remoteSportByName = {};
+      remoteSportById = {};
+      (payload.sports || []).forEach(sport => {
+        remoteSportByName[sport.name] = sport;
+        remoteSportById[sport.id] = sport;
+      });
+
+      remoteDraftByGroup = {};
+      (payload.drafts || []).forEach(draft => {
+        remoteDraftByGroup[draft.draft_group] = draft;
+      });
+
+      const currentActiveDraft = state?.activeDraft || "Professional";
+      const next = defaultState();
+      next.activeDraft = currentActiveDraft;
+      next.signedInOwner = session.playerName;
+      next.owners = (payload.players || [])
+        .filter(p => p.active)
+        .sort((a,b) =>
+          (Number(a.draft_position) || 9999) - (Number(b.draft_position) || 9999) ||
+          a.display_name.localeCompare(b.display_name)
+        )
+        .map(p => p.display_name);
+
+      const commissioner = (payload.players || []).find(p => p.is_commissioner && p.active);
+      next.commissioner = commissioner?.display_name || "";
+
+      next.timerSettings = {
+        manualSeconds: Number(payload.league.manual_timer_seconds) || 30,
+        autoSeconds: Number(payload.league.autodraft_timer_seconds) || 10
+      };
+
+      next.flexCounts = {
+        College: Number(payload.league.college_flex_count) || 0,
+        Professional: Number(payload.league.professional_flex_count) || 0
+      };
+
+      next.rosterRequirements = { College: {}, Professional: {} };
+      next.sportMaximums = { College: {}, Professional: {} };
+
+      (payload.sports || []).forEach(sport => {
+        next.rosterRequirements[sport.draft_group][sport.name] = Number(sport.required_count) || 0;
+        next.sportMaximums[sport.draft_group][sport.name] = Number(sport.max_count) || 1;
+      });
+
+      next.picks = (payload.picks || []).map(pick => ({
+        id: pick.id,
+        group: pick.group,
+        pickNumber: Number(pick.pick_number),
+        round: Number(pick.round_number),
+        owner: pick.owner,
+        ownerId: pick.league_player_id,
+        entryId: pick.entry_id,
+        name: pick.name,
+        sport: pick.sport,
+        isFlex: Boolean(pick.is_flex),
+        isAuto: Boolean(pick.is_autodraft),
+        selectedAt: pick.selected_at
+      }));
+
+      const draftedByEntry = new Map(next.picks.map(p => [p.entryId, p]));
+      next.entries = (payload.entries || []).map(entry => {
+        const drafted = draftedByEntry.get(entry.id);
+        return {
+          id: entry.id,
+          sportId: entry.sport_id,
+          name: entry.name,
+          sport: entry.sport,
+          group: entry.group,
+          type: entry.type,
+          ranking: entry.ranking,
+          active: Boolean(entry.active),
+          draftedBy: drafted?.owner || "",
+          draftPickId: drafted?.id || ""
+        };
+      });
+
+      next.favorites = {};
+      next.favorites[session.playerName] = (payload.favorites || []).map(f => f.entry_id);
+
+      next.currentPickIndex = {
+        College: Number(remoteDraftByGroup.College?.current_pick_index) || 0,
+        Professional: Number(remoteDraftByGroup.Professional?.current_pick_index) || 0
+      };
+
+      const viewedDraft = remoteDraftByGroup[next.activeDraft];
+      next.draftStatus = viewedDraft?.status || "paused";
+      next.pickDeadline = null;
+
+      if (viewedDraft?.status === "active" && viewedDraft.pick_started_at) {
+        const order = getDraftOrderFromState(next, next.activeDraft);
+        const slot = order[next.currentPickIndex[next.activeDraft]];
+        if (slot) {
+          const seconds = remoteSignedInOwners.has(slot.owner)
+            ? next.timerSettings.manualSeconds
+            : next.timerSettings.autoSeconds;
+          next.pickDeadline = new Date(viewedDraft.pick_started_at).getTime() + seconds * 1000;
+        }
+      }
+
+      state = next;
+    }
+
+    function getDraftOrderFromState(sourceState, group) {
+      const requiredRounds = Object.values(sourceState.rosterRequirements[group] || {})
+        .reduce((sum, count) => sum + Number(count || 0), 0);
+      const rounds = requiredRounds + Number(sourceState.flexCounts[group] || 0);
+      const order = [];
+      for (let round = 1; round <= rounds; round++) {
+        const owners = round % 2 === 1
+          ? sourceState.owners
+          : [...sourceState.owners].reverse();
+        owners.forEach(owner => order.push({
+          owner,
+          round,
+          pickNumber: order.length + 1
+        }));
+      }
+      return order;
+    }
+
+    function getDraftOrder(group = state.activeDraft) {
+      return getDraftOrderFromState(state, group);
+    }
+
+    async function refreshSharedState(forceRender = false) {
+      if (sharedRefreshInFlight || !sessionInfo()) return;
+      sharedRefreshInFlight = true;
+      try {
+        const { data, players } = await fetchSharedLeagueState();
+        const signature = JSON.stringify({
+          data,
+          presence: players.map(p => [p.player_id, p.is_signed_in])
+        });
+        applySharedLeagueState(data, players);
+        if (forceRender || signature !== lastSharedSignature) {
+          lastSharedSignature = signature;
+          renderAll();
+        } else {
+          renderTimer();
+        }
+      } catch (error) {
+        console.error("Shared state refresh failed:", error);
+        if (/expired|invalid/i.test(error.message || "")) {
+          localStorage.removeItem("omniSession");
+          await showLeagueGate();
+        }
+      } finally {
+        sharedRefreshInFlight = false;
+      }
+    }
+
+    function startSharedRefresh() {
+      clearInterval(sharedRefreshInterval);
+      sharedRefreshInterval = setInterval(() => refreshSharedState(false), 1500);
+    }
+
+    async function enterLeagueFromSession(session) {
+      if (!session?.leagueId || !session?.playerId || !session?.sessionToken) {
+        await showLeagueGate();
+        return;
+      }
+      currentLeagueId = session.leagueId;
+      state = loadState();
+      document.getElementById("leagueGate").hidden = true;
+      document.querySelector(".app-shell").hidden = false;
+      await refreshSharedState(true);
+      startHeartbeat();
+      startSharedRefresh();
+    }
+
+    async function leaveLeague() {
+      const session = sessionInfo();
+      if (session) {
+        try {
+          await supabaseClient.rpc("leave_omni_league", {
+            p_player_id: session.playerId,
+            p_session_token: session.sessionToken
+          });
+        } catch (error) {
+          console.error(error);
+        }
+      }
+      if (heartbeatInterval) clearInterval(heartbeatInterval);
+      if (sharedRefreshInterval) clearInterval(sharedRefreshInterval);
+      localStorage.removeItem("omniSession");
+      currentLeagueId = "";
+      state = defaultState();
+      await showLeagueGate();
+    }
+
+    function signIn() {
+      toast("Use the league landing page to choose a player.", "error");
+    }
+
+    async function signOut() {
+      await leaveLeague();
+    }
+
+    function requireCommissioner() {
+      const session = sessionInfo();
+      const ok = Boolean(session?.isCommissioner && state.commissioner === session.playerName);
+      if (!ok) toast("Commissioner access is required.", "error");
+      return ok;
+    }
+
+    function claimCommissioner() {
+      toast("The league creator is the commissioner. Commissioner status is stored in Supabase.", "error");
+    }
+
+    function releaseCommissioner() {
+      toast("Commissioner transfer is not enabled yet.", "error");
+    }
+
+    async function toggleFavorite(entryId) {
+      const session = sessionInfo();
+      if (!session) return toast("Join a league before favoriting teams.", "error");
+      const { error } = await supabaseClient.rpc("toggle_omni_favorite", {
+        p_player_id: session.playerId,
+        p_session_token: session.sessionToken,
+        p_entry_id: entryId
+      });
+      if (error) return toast(error.message, "error");
+      await refreshSharedState(true);
+    }
+    window.toggleFavorite = toggleFavorite;
+
+    async function saveEntry(event) {
+      event.preventDefault();
+      if (!requireCommissioner()) return;
+
+      const session = sessionInfo();
+      const sportName = document.getElementById("entrySport").value;
+      const sport = remoteSportByName[sportName];
+      const names = document.getElementById("teamList").value
+        .split(/\r?\n/)
+        .map(name => name.trim())
+        .filter(Boolean);
+
+      if (!sport || !names.length) {
+        toast("Enter at least one team or competitor.", "error");
+        return;
+      }
+
+      const replace = document.getElementById("replaceSportEntries").value === "replace";
+      const { data, error } = await supabaseClient.rpc("save_omni_ranked_entries", {
+        p_player_id: session.playerId,
+        p_session_token: session.sessionToken,
+        p_sport_id: sport.id,
+        p_names: names,
+        p_replace: replace
+      });
+
+      if (error) return toast(error.message, "error");
+      document.getElementById("entryDialog").close();
+      document.getElementById("teamList").value = "";
+      await refreshSharedState(true);
+      toast(`${data?.added ?? names.length} ranked ${sportName} entries added.`);
+    }
+
+    window.editEntry = async id => {
+      if (!requireCommissioner()) return;
+      const entry = state.entries.find(e => e.id === id);
+      if (!entry) return;
+      const newName = prompt("Edit the name:", entry.name);
+      if (newName === null) return;
+      const cleanedName = newName.trim();
+      if (!cleanedName) return toast("Name cannot be blank.", "error");
+      const newRank = prompt("Edit the ranking:", String(entry.ranking || ""));
+      if (newRank === null) return;
+
+      const session = sessionInfo();
+      const { error } = await supabaseClient.rpc("update_omni_entry", {
+        p_player_id: session.playerId,
+        p_session_token: session.sessionToken,
+        p_entry_id: id,
+        p_name: cleanedName,
+        p_ranking: Number(newRank) || null
+      });
+      if (error) return toast(error.message, "error");
+      await refreshSharedState(true);
+      toast("Entry updated.");
+    };
+
+    window.deleteEntry = async id => {
+      if (!requireCommissioner()) return;
+      const entry = state.entries.find(e => e.id === id);
+      if (!entry) return;
+      if (!confirm(`Delete ${entry.name}?`)) return;
+      const session = sessionInfo();
+      const { error } = await supabaseClient.rpc("delete_omni_entry", {
+        p_player_id: session.playerId,
+        p_session_token: session.sessionToken,
+        p_entry_id: id
+      });
+      if (error) return toast(error.message, "error");
+      await refreshSharedState(true);
+      toast(`${entry.name} was deleted.`);
+    };
+
+    async function addPlayer() {
+      if (!requireCommissioner()) return;
+      const input = document.getElementById("newPlayerName");
+      const name = input.value.trim();
+      if (!name) return toast("Enter a player name.", "error");
+      const session = sessionInfo();
+      const { error } = await supabaseClient.rpc("add_omni_player", {
+        p_player_id: session.playerId,
+        p_session_token: session.sessionToken,
+        p_display_name: name
+      });
+      if (error) return toast(error.message, "error");
+      input.value = "";
+      await refreshSharedState(true);
+      toast(`${name} was added.`);
+    }
+
+    async function removePlayer() {
+      if (!requireCommissioner()) return;
+      const playerId = document.getElementById("removePlayerSelect").value;
+      const player = remotePlayerById[playerId];
+      if (!player) return toast("Choose a player to remove.", "error");
+      if (!confirm(`Remove ${player.display_name} from the league?`)) return;
+      const session = sessionInfo();
+      const { error } = await supabaseClient.rpc("remove_omni_player", {
+        p_player_id: session.playerId,
+        p_session_token: session.sessionToken,
+        p_remove_player_id: playerId
+      });
+      if (error) return toast(error.message, "error");
+      await refreshSharedState(true);
+      toast(`${player.display_name} was removed.`);
+    }
+
+    async function saveLeagueSettings() {
+      if (!requireCommissioner()) return;
+      const session = sessionInfo();
+      const manual = Math.min(600, Math.max(5, Number(document.getElementById("manualDraftSeconds").value) || 30));
+      const auto = Math.min(600, Math.max(3, Number(document.getElementById("autoDraftSeconds").value) || 10));
+      const collegeFlex = Math.max(0, Number(document.getElementById("collegeFlexInput").value) || 0);
+      const proFlex = Math.max(0, Number(document.getElementById("professionalFlexInput").value) || 0);
+
+      const { error } = await supabaseClient.rpc("update_omni_league_settings", {
+        p_player_id: session.playerId,
+        p_session_token: session.sessionToken,
+        p_manual_seconds: manual,
+        p_auto_seconds: auto,
+        p_college_flex: collegeFlex,
+        p_professional_flex: proFlex
+      });
+      if (error) return toast(error.message, "error");
+      await refreshSharedState(true);
+      toast("League settings saved.");
+    }
+
+    function renderSportLimitControls() {
+      const container = document.getElementById("sportLimitControls");
+      if (!container) return;
+      container.innerHTML = (SPORTS || []).map(def => {
+        const sport = remoteSportByName[def.name];
+        if (!sport) return "";
+        return `
+          <div style="display:grid;grid-template-columns:1fr 78px 78px;gap:8px;align-items:center">
+            <span>${escapeHtml(def.name)}</span>
+            <input class="sport-required-input" data-sport-id="${sport.id}" type="number" min="0" max="10"
+              value="${Number(sport.required_count) || 0}" title="Required" aria-label="${escapeHtml(def.name)} required">
+            <input class="sport-max-input" data-sport-id="${sport.id}" type="number" min="1" max="10"
+              value="${Number(sport.max_count) || 1}" title="Maximum" aria-label="${escapeHtml(def.name)} maximum">
+          </div>`;
+      }).join("");
+      if (container.innerHTML) {
+        container.insertAdjacentHTML("afterbegin",
+          '<div style="display:grid;grid-template-columns:1fr 78px 78px;gap:8px;color:var(--muted);font-size:.75rem"><span>Sport</span><span>Required</span><span>Maximum</span></div>'
+        );
+      }
+    }
+
+    async function saveSportLimits() {
+      if (!requireCommissioner()) return;
+      const session = sessionInfo();
+      const requiredInputs = [...document.querySelectorAll(".sport-required-input")];
+      const maxInputs = [...document.querySelectorAll(".sport-max-input")];
+      const maxById = new Map(maxInputs.map(input => [input.dataset.sportId, Number(input.value)]));
+
+      for (const input of requiredInputs) {
+        const sportId = input.dataset.sportId;
+        const required = Math.max(0, Number(input.value) || 0);
+        const max = Math.max(1, maxById.get(sportId) || 1);
+        const { error } = await supabaseClient.rpc("update_omni_sport_limit", {
+          p_player_id: session.playerId,
+          p_session_token: session.sessionToken,
+          p_sport_id: sportId,
+          p_required_count: required,
+          p_max_count: max
+        });
+        if (error) return toast(error.message, "error");
+      }
+      await refreshSharedState(true);
+      toast("Sport limits saved.");
+    }
+
+    function getOwnerFlexUsed(owner, group = state.activeDraft) {
+      return state.picks.filter(p => p.owner === owner && p.group === group && p.isFlex).length;
+    }
+
+    function canOwnerDraftEntry(owner, entry) {
+      if (!entry.active) return { allowed: false, reason: "This entry is inactive." };
+      if (entry.draftedBy) return { allowed: false, reason: "This entry has already been drafted." };
+      if (entry.group !== state.activeDraft) return { allowed: false, reason: `This entry belongs to the ${entry.group} draft.` };
+
+      const required = Number(state.rosterRequirements[state.activeDraft]?.[entry.sport] || 0);
+      const maximum = Number(state.sportMaximums?.[state.activeDraft]?.[entry.sport] || 3);
+      const sportCount = getOwnerSportCount(owner, entry.sport);
+      if (sportCount >= maximum) {
+        return { allowed: false, reason: `${owner} already reached the maximum of ${maximum} in ${entry.sport}.` };
+      }
+      const isFlex = sportCount >= required;
+      if (isFlex && getOwnerFlexUsed(owner) >= Number(state.flexCounts[state.activeDraft] || 0)) {
+        return { allowed: false, reason: `${owner} has no flex picks remaining.` };
+      }
+      return { allowed: true, isFlex };
+    }
+
+    async function draftEntry(entryId, isAuto = false) {
+      if (isAuto) return autoDraftCurrentOwner();
+      const session = sessionInfo();
+      const slot = getCurrentDraftSlot();
+      if (!session || !slot) return;
+      if (state.draftStatus !== "active") return toast("Start the draft before making a selection.", "error");
+      if (slot.owner !== session.playerName) return toast(`Only ${slot.owner} can make this pick.`, "error");
+
+      const { error } = await supabaseClient.rpc("make_omni_draft_pick", {
+        p_player_id: session.playerId,
+        p_session_token: session.sessionToken,
+        p_entry_id: entryId,
+        p_is_autodraft: false
+      });
+      if (error) return toast(error.message, "error");
+      await refreshSharedState(true);
+    }
+    window.draftEntry = draftEntry;
+
+    async function autoDraftCurrentOwner() {
+      if (autoDraftInFlight || state.draftStatus !== "active") return;
+      const session = sessionInfo();
+      if (!session) return;
+      autoDraftInFlight = true;
+      try {
+        const { data, error } = await supabaseClient.rpc("auto_omni_draft_current_pick", {
+          p_league_id: session.leagueId,
+          p_draft_group: state.activeDraft
+        });
+        if (error) throw error;
+        if (data?.action === "picked") {
+          toast(`${data.owner} auto-drafted ${data.name}.`);
+        }
+        await refreshSharedState(true);
+      } catch (error) {
+        // Another browser may have won the race to process the timeout.
+        if (!/not ready|changed|already|timeout/i.test(error.message || "")) {
+          console.error(error);
+        }
+      } finally {
+        autoDraftInFlight = false;
+      }
+    }
+
+    function resetPickClock() {
+      // Server timestamps are authoritative. No browser-local clock reset.
+      renderTimer();
+    }
+
+    function renderTimer() {
+      const box = document.getElementById("draftTimer");
+      if (!box) return;
+      const draft = remoteDraftByGroup[state.activeDraft];
+      const slot = getCurrentDraftSlot();
+
+      if (!draft || draft.status !== "active" || !slot || !draft.pick_started_at) {
+        box.className = "timer-box";
+        box.innerHTML = `<strong>--</strong><span>${draft?.status === "complete" ? "Draft complete" : "Draft clock paused"}</span>`;
+        return;
+      }
+
+      const auto = !remoteSignedInOwners.has(slot.owner);
+      const seconds = auto ? state.timerSettings.autoSeconds : state.timerSettings.manualSeconds;
+      const deadline = new Date(draft.pick_started_at).getTime() + seconds * 1000;
+      const remaining = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+      box.className = `timer-box ${auto ? "autodraft" : ""}`;
+      box.innerHTML = `<strong>${remaining}</strong><span>${auto ? "Autodraft in" : "Time remaining"} · ${escapeHtml(slot.owner)}</span>`;
+      if (remaining <= 0) autoDraftCurrentOwner();
+    }
+
+    async function setDraftStatus(status) {
+      if (!requireCommissioner()) return;
+      const session = sessionInfo();
+      const { error } = await supabaseClient.rpc("set_omni_draft_status", {
+        p_player_id: session.playerId,
+        p_session_token: session.sessionToken,
+        p_draft_group: state.activeDraft,
+        p_status: status
+      });
+      if (error) return toast(error.message, "error");
+      await refreshSharedState(true);
+    }
+
+    async function undoLastPick() {
+      if (!requireCommissioner()) return;
+      const session = sessionInfo();
+      const { data, error } = await supabaseClient.rpc("undo_omni_last_pick", {
+        p_player_id: session.playerId,
+        p_session_token: session.sessionToken,
+        p_draft_group: state.activeDraft
+      });
+      if (error) return toast(error.message, "error");
+      if (!data) return toast("There are no picks to undo.", "error");
+      await refreshSharedState(true);
+      toast("Last pick undone.");
+    }
+
+    async function advancePick() {
+      if (!requireCommissioner()) return;
+      const session = sessionInfo();
+      const { error } = await supabaseClient.rpc("skip_omni_current_pick", {
+        p_player_id: session.playerId,
+        p_session_token: session.sessionToken,
+        p_draft_group: state.activeDraft
+      });
+      if (error) return toast(error.message, "error");
+      await refreshSharedState(true);
+      toast("Current pick skipped.");
+    }
+
+    async function resetDraftRemote() {
+      if (!requireCommissioner()) return;
+      if (!confirm(`Reset the ${state.activeDraft} draft and erase all of its picks?`)) return;
+      const session = sessionInfo();
+      const { error } = await supabaseClient.rpc("reset_omni_draft", {
+        p_player_id: session.playerId,
+        p_session_token: session.sessionToken,
+        p_draft_group: state.activeDraft
+      });
+      if (error) return toast(error.message, "error");
+      await refreshSharedState(true);
+      toast(`${state.activeDraft} draft reset.`);
+    }
+
+    async function setCurrentOwnerRemote(ownerName) {
+      if (!requireCommissioner()) return;
+      const player = remotePlayerByName[ownerName];
+      if (!player) return;
+      const session = sessionInfo();
+      const { error } = await supabaseClient.rpc("set_omni_current_owner", {
+        p_player_id: session.playerId,
+        p_session_token: session.sessionToken,
+        p_draft_group: state.activeDraft,
+        p_target_player_id: player.id
+      });
+      if (error) return toast(error.message, "error");
+      await refreshSharedState(true);
+      toast(`Current pick moved to ${ownerName}.`);
+    }
+
+    async function clearAllTeamsRemote() {
+      if (!requireCommissioner()) return;
+      if (!confirm("Delete every team and competitor from this league?")) return;
+      const session = sessionInfo();
+      const { error } = await supabaseClient.rpc("clear_omni_entries", {
+        p_player_id: session.playerId,
+        p_session_token: session.sessionToken
+      });
+      if (error) return toast(error.message, "error");
+      await refreshSharedState(true);
+      toast("All teams and competitors were removed.");
+    }
+
+    function syncCommissionerControls() {
+      document.getElementById("collegeFlexInput").value = state.flexCounts.College;
+      document.getElementById("professionalFlexInput").value = state.flexCounts.Professional;
+      document.getElementById("manualDraftSeconds").value = state.timerSettings.manualSeconds;
+      document.getElementById("autoDraftSeconds").value = state.timerSettings.autoSeconds;
+
+      const isCommissioner = requireCommissionerSilent();
+      const commissionerText = document.getElementById("commissionerIdentityText");
+      commissionerText.textContent = state.commissioner
+        ? `${state.commissioner} is the commissioner.`
+        : "No commissioner is assigned.";
+
+      document.getElementById("claimCommissioner").hidden = true;
+      document.getElementById("releaseCommissioner").hidden = true;
+
+      ["commissionerOwner","manualDraftSeconds","autoDraftSeconds","newPlayerName","addPlayer","removePlayerSelect",
+       "removePlayer","collegeFlexInput","professionalFlexInput","startDraft","pauseDraft","advancePick","resetDraft",
+       "clearAllTeams","saveSportLimits"].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.disabled = !isCommissioner;
+      });
+
+      document.getElementById("openAddEntry").disabled = !isCommissioner;
+      document.getElementById("undoLastPick").disabled = !isCommissioner || getDraftPicks().length === 0;
+
+      const removeSelect = document.getElementById("removePlayerSelect");
+      if (removeSelect) {
+        const selected = removeSelect.value;
+        removeSelect.innerHTML = Object.values(remotePlayerById)
+          .filter(player => player.active && !player.is_commissioner)
+          .sort((a,b) => (a.draft_position || 9999) - (b.draft_position || 9999))
+          .map(player => `<option value="${player.id}">${escapeHtml(player.display_name)}</option>`).join("");
+        if ([...removeSelect.options].some(o => o.value === selected)) removeSelect.value = selected;
+      }
+
+      const signInOwner = document.getElementById("signInOwner");
+      signInOwner.innerHTML = `<option>${escapeHtml(state.signedInOwner || "Not signed in")}</option>`;
+      signInOwner.disabled = true;
+      document.getElementById("signInButton").hidden = true;
+      document.getElementById("signOutButton").hidden = !state.signedInOwner;
+
+      renderSportLimitControls();
+    }
+
+    function requireCommissionerSilent() {
+      const session = sessionInfo();
+      return Boolean(session?.isCommissioner && state.commissioner === session.playerName);
+    }
+
+    function renderAll() {
+      populateSelects();
+      renderSummary();
+      renderDatabase();
+      renderDraftStatus();
+      renderDraftOrder();
+      renderRequirements();
+      renderAvailable();
+      renderHistory();
+      syncCommissionerControls();
+      renderTimer();
+    }
+
+
+
     document.getElementById("leagueSearchInput").addEventListener("input", renderLeagueSearch);
     document.getElementById("createLeagueButton").addEventListener("click", createLeague);
     document.getElementById("leaveLeagueButton").addEventListener("click", leaveLeague);
+
     document.querySelectorAll(".tab-button").forEach(button => {
       button.addEventListener("click", () => {
         document.querySelectorAll(".tab-button").forEach(b => b.classList.remove("active"));
@@ -2126,24 +2852,20 @@ Atlanta Braves"></textarea>
     document.getElementById("releaseCommissioner").addEventListener("click", releaseCommissioner);
     document.getElementById("addPlayer").addEventListener("click", addPlayer);
     document.getElementById("removePlayer").addEventListener("click", removePlayer);
-    document.getElementById("manualDraftSeconds").addEventListener("change", event => {
-      if (!requireCommissioner()) return renderAll();
-      state.timerSettings.manualSeconds = Math.min(600, Math.max(5, Number(event.target.value) || 30));
-      resetPickClock();
-      saveState();
-      renderAll();
-    });
-    document.getElementById("autoDraftSeconds").addEventListener("change", event => {
-      if (!requireCommissioner()) return renderAll();
-      state.timerSettings.autoSeconds = Math.min(600, Math.max(3, Number(event.target.value) || 10));
-      resetPickClock();
-      saveState();
-      renderAll();
-    });
 
-    document.getElementById("signInButton").addEventListener("click", () => toast("Leave the league first, then use Join As to switch players.", "error"));
+    ["manualDraftSeconds","autoDraftSeconds","collegeFlexInput","professionalFlexInput"].forEach(id => {
+      document.getElementById(id).addEventListener("change", saveLeagueSettings);
+    });
+    document.getElementById("saveSportLimits").addEventListener("click", saveSportLimits);
+
+    document.getElementById("signInButton").addEventListener("click", () =>
+      toast("Leave the league first, then use Join As to switch players.", "error")
+    );
     document.getElementById("signOutButton").addEventListener("click", leaveLeague);
-    document.getElementById("openAddEntry").addEventListener("click", openEntryDialog);
+
+    document.getElementById("openAddEntry").addEventListener("click", () => {
+      if (requireCommissioner()) openEntryDialog();
+    });
     document.getElementById("closeEntryDialog").addEventListener("click", () => document.getElementById("entryDialog").close());
     document.getElementById("cancelEntry").addEventListener("click", () => document.getElementById("entryDialog").close());
     document.getElementById("entryForm").addEventListener("submit", saveEntry);
@@ -2152,134 +2874,34 @@ Atlanta Braves"></textarea>
     ["databaseSearch","databaseSportFilter","databaseLevelFilter"].forEach(id =>
       document.getElementById(id).addEventListener("input", renderDatabase)
     );
-
     ["availableSearch","availableSportFilter","availableSort"].forEach(id =>
       document.getElementById(id).addEventListener("input", renderAvailable)
     );
 
     document.getElementById("requirementOwnerSelector").addEventListener("change", renderRequirements);
 
-    document.getElementById("draftTypeSelector").addEventListener("change", event => {
+    document.getElementById("draftTypeSelector").addEventListener("change", async event => {
       state.activeDraft = event.target.value;
-      state.draftStatus = getCurrentDraftSlot() ? "paused" : "complete";
-      resetPickClock();
-      saveState();
+      const draft = remoteDraftByGroup[state.activeDraft];
+      state.draftStatus = draft?.status || "paused";
+      state.currentPickIndex[state.activeDraft] = Number(draft?.current_pick_index) || 0;
       renderAll();
     });
 
-    document.getElementById("startDraft").addEventListener("click", () => {
-      if (!requireCommissioner()) return;
-      if (!getCurrentDraftSlot()) {
-        toast("This draft is complete.", "error");
-        return;
-      }
-      state.draftStatus = "active";
-      resetPickClock();
-      saveState();
-      renderAll();
-      toast(`${state.activeDraft} draft started.`);
-    });
+    document.getElementById("startDraft").addEventListener("click", () => setDraftStatus("active"));
+    document.getElementById("pauseDraft").addEventListener("click", () => setDraftStatus("paused"));
+    document.getElementById("advancePick").addEventListener("click", advancePick);
+    document.getElementById("undoLastPick").addEventListener("click", undoLastPick);
+    document.getElementById("resetDraft").addEventListener("click", resetDraftRemote);
 
-    document.getElementById("pauseDraft").addEventListener("click", () => {
-      if (!requireCommissioner()) return;
-      state.draftStatus = "paused";
-      resetPickClock();
-      saveState();
-      renderAll();
-      toast("Draft paused.");
-    });
+    document.getElementById("commissionerOwner").addEventListener("change", event =>
+      setCurrentOwnerRemote(event.target.value)
+    );
 
-    document.getElementById("advancePick").addEventListener("click", () => {
-      if (requireCommissioner()) advancePick();
-    });
-    document.getElementById("undoLastPick").addEventListener("click", () => {
-      if (requireCommissioner()) undoLastPick();
-    });
+    document.getElementById("clearAllTeams").addEventListener("click", clearAllTeamsRemote);
 
-    document.getElementById("commissionerOwner").addEventListener("change", event => {
-      if (!requireCommissioner()) return renderAll();
-      const desiredOwner = event.target.value;
-      const order = getDraftOrder();
-      const currentIndex = state.currentPickIndex[state.activeDraft];
-      const nextIndex = order.findIndex((slot, index) => index >= currentIndex && slot.owner === desiredOwner);
+    window.addEventListener("focus", () => refreshSharedState(true));
 
-      if (nextIndex === -1) {
-        toast("That owner has no remaining picks.", "error");
-        renderAll();
-        return;
-      }
-
-      state.currentPickIndex[state.activeDraft] = nextIndex;
-      state.draftStatus = "paused";
-      resetPickClock();
-      saveState();
-      renderAll();
-      toast(`Current pick moved to ${desiredOwner}.`);
-    });
-
-    document.getElementById("collegeFlexInput").addEventListener("change", event => {
-      if (!requireCommissioner()) return renderAll();
-      state.flexCounts.College = Math.max(0, Number(event.target.value) || 0);
-      saveState();
-      renderAll();
-    });
-
-    document.getElementById("professionalFlexInput").addEventListener("change", event => {
-      if (!requireCommissioner()) return renderAll();
-      state.flexCounts.Professional = Math.max(0, Number(event.target.value) || 0);
-      saveState();
-      renderAll();
-    });
-
-    document.getElementById("resetDraft").addEventListener("click", () => {
-      if (!requireCommissioner()) return;
-      if (!confirm(`Reset the ${state.activeDraft} draft and erase all of its picks?`)) return;
-
-      const groupPickIds = new Set(
-        state.picks.filter(p => p.group === state.activeDraft).map(p => p.id)
-      );
-
-      state.entries.forEach(entry => {
-        if (groupPickIds.has(entry.draftPickId)) {
-          entry.draftedBy = "";
-          entry.draftPickId = "";
-        }
-      });
-
-      state.picks = state.picks.filter(p => p.group !== state.activeDraft);
-      state.currentPickIndex[state.activeDraft] = 0;
-      state.draftStatus = "paused";
-      resetPickClock();
-      saveState();
-      renderAll();
-      toast(`${state.activeDraft} draft reset.`);
-    });
-
-    document.getElementById("clearAllTeams").addEventListener("click", () => {
-      if (!requireCommissioner()) return;
-      if (!confirm("Delete every team and competitor from the database?")) return;
-      if (state.picks.length) {
-        toast("Reset both drafts before clearing all teams.", "error");
-        return;
-      }
-      state.entries = [];
-      saveState();
-      renderAll();
-      toast("All teams and competitors were removed.");
-    });
-
-
-    window.addEventListener("beforeunload", () => {
-      if (!state.signedInOwner) return;
-      const presence = readPresence();
-      if (presence[state.signedInOwner]?.sessionId === SESSION_ID) {
-        delete presence[state.signedInOwner];
-        writePresence(presence);
-      }
-    });
-    window.addEventListener("storage", () => {
-      if (currentLeagueId) renderAll();
-    });
 
     async function initializeOmni() {
       const session = getStoredSession();
