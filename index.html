@@ -1059,6 +1059,75 @@ Atlanta Braves"></textarea>
         return data;
     }
 
+    async function searchLeagues(searchText) {
+        const { data, error } = await supabaseClient.rpc(
+            "search_omni_leagues",
+            {
+                p_search: searchText
+            }
+        );
+    
+        if (error) {
+            console.error(error);
+            throw new Error(error.message);
+        }
+    
+        return data;
+    }
+
+    async function getLeaguePlayers(leagueId) {
+        const { data, error } = await supabaseClient.rpc(
+            "get_omni_league_players",
+            {
+                p_league_id: leagueId
+            }
+        );
+    
+        if (error) {
+            console.error(error);
+            throw new Error(error.message);
+        }
+    
+        return data;
+    }
+
+    async function joinLeague(
+        leagueId,
+        playerId,
+        password
+    ) {
+        const { data, error } = await supabaseClient.rpc(
+            "join_omni_league",
+            {
+                p_league_id: leagueId,
+                p_player_id: playerId,
+                p_password: password
+            }
+        );
+    
+        if (error) {
+            console.error(error);
+            throw new Error(error.message);
+        }
+    
+        localStorage.setItem(
+            "omniSession",
+            JSON.stringify({
+                leagueId: data.league.id,
+                leagueName: data.league.name,
+    
+                playerId: data.player.id,
+                playerName: data.player.display_name,
+    
+                isCommissioner: data.player.is_commissioner,
+    
+                sessionToken: data.session_token
+            })
+        );
+    
+        return data;
+    }
+
     function readPresence() {
       try { return JSON.parse(localStorage.getItem(presenceKey()) || "{}"); }
       catch { return {}; }
@@ -1118,13 +1187,58 @@ Atlanta Braves"></textarea>
     }
 
     function startHeartbeat() {
-      clearInterval(heartbeatInterval);
-      heartbeatInterval = setInterval(() => {
-        if (!state.signedInOwner) return;
-        const presence = cleanPresence();
-        presence[state.signedInOwner] = { sessionId: SESSION_ID, timestamp: Date.now() };
-        writePresence(presence);
-      }, 3000);
+        const session = JSON.parse(
+            localStorage.getItem("omniSession")
+        );
+    
+        if (!session) return;
+    
+        heartbeatInterval = setInterval(
+            async () => {
+                const { data, error } =
+                    await supabaseClient.rpc(
+                        "omni_session_heartbeat",
+                        {
+                            p_player_id: session.playerId,
+                            p_session_token:
+                                session.sessionToken
+                        }
+                    );
+    
+                if (error || data !== true) {
+                    console.error(
+                        "Session heartbeat failed.",
+                        error
+                    );
+                }
+            },
+            15000
+        );
+    }
+
+    async function leaveLeague() {
+        const session = JSON.parse(
+            localStorage.getItem("omniSession")
+        );
+    
+        if (session) {
+            await supabaseClient.rpc(
+                "leave_omni_league",
+                {
+                    p_player_id: session.playerId,
+                    p_session_token:
+                        session.sessionToken
+                }
+            );
+        }
+    
+        if (heartbeatInterval) {
+            clearInterval(heartbeatInterval);
+        }
+    
+        localStorage.removeItem("omniSession");
+    
+        location.reload();
     }
 
     function getPickSeconds() {
