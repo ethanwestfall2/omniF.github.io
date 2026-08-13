@@ -515,6 +515,99 @@
     .timer-box { text-align:center; padding:14px; margin-bottom:12px; border:1px solid var(--border); border-radius:12px; background:#0f172a; }
     .timer-box strong { display:block; font-size:2rem; color:var(--primary); line-height:1; margin-bottom:6px; }
     .timer-box.autodraft strong { color:var(--warning); }
+
+    .draft-focus {
+      display:grid;
+      grid-template-columns:1fr 150px;
+      gap:10px;
+      align-items:stretch;
+      margin-bottom:12px;
+    }
+    .draft-focus .current-turn-banner,
+    .draft-focus .timer-box { margin-bottom:0; }
+    .draft-focus .current-turn-banner {
+      display:flex;
+      flex-direction:column;
+      justify-content:center;
+      min-height:92px;
+      font-size:1rem;
+    }
+    .draft-focus .current-turn-banner strong {
+      display:block;
+      font-size:1.35rem;
+      margin-bottom:4px;
+    }
+    .draft-focus .timer-box {
+      display:flex;
+      flex-direction:column;
+      justify-content:center;
+      min-height:92px;
+    }
+    .draft-focus .timer-box strong { font-size:2.65rem; }
+
+    .upcoming-strip {
+      display:grid;
+      grid-template-columns:repeat(4, minmax(0,1fr));
+      gap:7px;
+      margin-bottom:12px;
+    }
+    .upcoming-chip {
+      border:1px solid var(--border);
+      border-radius:9px;
+      background:#0f172a;
+      padding:8px;
+      min-width:0;
+    }
+    .upcoming-chip span {
+      display:block;
+      color:var(--muted);
+      font-size:.7rem;
+      margin-bottom:2px;
+    }
+    .upcoming-chip strong {
+      display:block;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      white-space:nowrap;
+      font-size:.82rem;
+    }
+
+    .roster-card { grid-column: span 4; }
+    .roster-list { display:grid; gap:8px; }
+    .roster-sport {
+      border:1px solid var(--border);
+      background:var(--panel-2);
+      border-radius:10px;
+      padding:10px 11px;
+    }
+    .roster-sport-header {
+      display:flex;
+      justify-content:space-between;
+      gap:10px;
+      align-items:center;
+      margin-bottom:6px;
+    }
+    .roster-pick {
+      display:flex;
+      justify-content:space-between;
+      gap:8px;
+      color:var(--muted);
+      font-size:.82rem;
+      padding-top:4px;
+    }
+    .roster-pick strong { color:var(--text); font-weight:700; }
+    .filter-active {
+      border-color:var(--warning) !important;
+      color:#fde68a !important;
+      background:rgba(245,158,11,.10) !important;
+    }
+    .draft-tools {
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      align-items:center;
+    }
+
     .favorite-btn { background:transparent; border:0; color:#64748b; font-size:1.35rem; padding:2px 6px; line-height:1; }
     .favorite-btn.active { color:#facc15; }
     .available-actions { display:flex; align-items:center; gap:7px; }
@@ -551,7 +644,7 @@
 
     @media (max-width: 1100px) {
       .draft-order-card, .requirements-card, .available-card,
-      .history-card, .commissioner-card { grid-column: span 12; }
+      .roster-card, .history-card, .commissioner-card { grid-column: span 12; }
       .summary-grid { grid-template-columns: repeat(2, 1fr); }
     }
 
@@ -563,6 +656,8 @@
       .form-field.full { grid-column: auto; }
       .summary-grid { grid-template-columns: 1fr; }
       .button-grid { grid-template-columns: 1fr; }
+      .draft-focus { grid-template-columns:1fr; }
+      .upcoming-strip { grid-template-columns:repeat(2, minmax(0,1fr)); }
     }
   </style>
 </head>
@@ -696,8 +791,11 @@
               </select>
             </div>
             <div class="card-body">
-              <div id="currentTurnBanner" class="current-turn-banner"></div>
-              <div id="draftTimer" class="timer-box"><strong>--</strong><span>Draft clock</span></div>
+              <div class="draft-focus">
+                <div id="currentTurnBanner" class="current-turn-banner"></div>
+                <div id="draftTimer" class="timer-box"><strong>--</strong><span>Draft clock</span></div>
+              </div>
+              <div id="upcomingPicks" class="upcoming-strip"></div>
               <div id="draftOrderList" class="draft-list"></div>
             </div>
           </div>
@@ -715,6 +813,10 @@
           <div class="card available-card">
             <div class="card-header">
               <h3>Available Entries</h3>
+              <div class="draft-tools">
+                <button class="btn btn-small" id="favoritesOnlyButton" type="button">☆ Favorites Only</button>
+                <button class="btn btn-small" id="draftSoundButton" type="button">🔇 Draft Sound</button>
+              </div>
             </div>
             <div class="card-body">
               <div class="toolbar draft" style="margin-bottom:12px">
@@ -726,6 +828,16 @@
                 </select>
               </div>
               <div id="availableList" class="available-list"></div>
+            </div>
+          </div>
+
+          <div class="card roster-card">
+            <div class="card-header">
+              <h3>My Roster</h3>
+              <span id="myRosterCount" class="pill">0 picks</span>
+            </div>
+            <div class="card-body">
+              <div id="myRosterList" class="roster-list"></div>
             </div>
           </div>
 
@@ -1749,10 +1861,16 @@ Atlanta Braves"></textarea>
       const currentIndex = state.currentPickIndex[state.activeDraft];
 
       const currentSlot = getCurrentDraftSlot();
-      const currentIsSignedIn = currentSlot && currentSlot.owner === state.signedInOwner && isOwnerSignedIn(currentSlot.owner);
+      const currentOnline = Boolean(currentSlot && isOwnerSignedIn(currentSlot.owner));
+      const currentSeconds = currentOnline
+        ? state.timerSettings.manualSeconds
+        : state.timerSettings.autoSeconds;
+
       document.getElementById("currentTurnBanner").innerHTML = currentSlot
-        ? `<strong>${escapeHtml(currentSlot.owner)}</strong> is on the clock for pick #${currentSlot.pickNumber}. ${currentIsSignedIn ? "30-second live pick." : "Autodraft is active with a 10-second clock."}`
-        : `<strong>${escapeHtml(state.activeDraft)} draft complete.</strong>`;
+        ? `<strong>${escapeHtml(currentSlot.owner)}</strong><span>Pick #${currentSlot.pickNumber} · Round ${currentSlot.round} · ${currentOnline ? `${currentSeconds}-second live pick` : `${currentSeconds}-second autodraft`}</span>`
+        : `<strong>${escapeHtml(state.activeDraft)} draft complete.</strong><span>All scheduled selections are finished.</span>`;
+
+      renderUpcomingPicks();
 
       const visibleStart = Math.max(0, currentIndex - 3);
       const visibleEnd = Math.min(order.length, currentIndex + 10);
@@ -1766,7 +1884,7 @@ Atlanta Braves"></textarea>
             <div class="pick-number">#${slot.pickNumber}</div>
             <div>
               <strong class="${isOwnerSignedIn(slot.owner) ? "signed-owner" : "offline-owner"}">${escapeHtml(slot.owner)}</strong>
-              <div class="draft-meta">${isOwnerSignedIn(slot.owner) ? "Signed in" : "Autodraft"} · 
+              <div class="draft-meta">${isOwnerSignedIn(slot.owner) ? "Signed in" : "Autodraft"} ·
                 Round ${slot.round} · ${pick ? `${escapeHtml(pick.name)} (${escapeHtml(pick.sport)})` : isCurrent ? "On the clock" : "Upcoming"}
               </div>
             </div>
@@ -1816,11 +1934,18 @@ Atlanta Braves"></textarea>
       const sort = document.getElementById("availableSort").value;
       const currentSlot = getCurrentDraftSlot();
 
+      const favoriteIds = new Set(
+        state.signedInOwner
+          ? (state.favorites[state.signedInOwner] || [])
+          : []
+      );
+
       let entries = state.entries.filter(entry =>
         entry.group === state.activeDraft &&
         entry.active &&
         !entry.draftedBy &&
         (!sport || entry.sport === sport) &&
+        (!favoritesOnly || favoriteIds.has(entry.id)) &&
         (!query || `${entry.name} ${entry.sport}`.toLowerCase().includes(query))
       );
 
@@ -1829,10 +1954,12 @@ Atlanta Braves"></textarea>
         : (a, b) => (Number(a.ranking) || 9999) - (Number(b.ranking) || 9999) || a.name.localeCompare(b.name)
       );
 
+      renderDraftTools();
+
       const list = document.getElementById("availableList");
 
       if (!entries.length) {
-        list.innerHTML = `<div class="empty">No available entries match the selected filters.</div>`;
+        list.innerHTML = `<div class="empty">${favoritesOnly ? "No favorited entries match the selected filters." : "No available entries match the selected filters."}</div>`;
         return;
       }
 
@@ -1841,8 +1968,9 @@ Atlanta Braves"></textarea>
           ? canOwnerDraftEntry(currentSlot.owner, entry)
           : { allowed: false, reason: "Draft complete" };
 
-        const isFavorite = Boolean(state.signedInOwner && (state.favorites[state.signedInOwner] || []).includes(entry.id));
+        const isFavorite = favoriteIds.has(entry.id);
         const canManuallyPick = currentSlot && currentSlot.owner === state.signedInOwner;
+
         return `
           <div class="available-row">
             <div>
@@ -2148,6 +2276,9 @@ Atlanta Braves"></textarea>
     let autoDraftInFlight = false;
     let sharedRefreshInFlight = false;
     let lastSharedSignature = "";
+    let favoritesOnly = false;
+    let draftSoundEnabled = localStorage.getItem("omniDraftSoundEnabled") === "true";
+    let lastObservedPickCount = null;
 
     function sessionInfo() {
       return getStoredSession();
@@ -2346,6 +2477,16 @@ Atlanta Braves"></textarea>
           presence: players.map(p => [p.player_id, p.is_signed_in])
         });
         applySharedLeagueState(data, players);
+
+        const currentPickCount = state.picks.length;
+        if (
+          lastObservedPickCount !== null &&
+          currentPickCount > lastObservedPickCount
+        ) {
+          playDraftSound();
+        }
+        lastObservedPickCount = currentPickCount;
+
         if (forceRender || signature !== lastSharedSignature) {
           lastSharedSignature = signature;
           renderAll();
@@ -2904,6 +3045,120 @@ Atlanta Braves"></textarea>
       location.reload();
     }
 
+    function playDraftSound() {
+      if (!draftSoundEnabled) return;
+      try {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (!AudioCtx) return;
+        const ctx = new AudioCtx();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(660, ctx.currentTime);
+        osc.frequency.setValueAtTime(880, ctx.currentTime + 0.09);
+
+        gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.12, ctx.currentTime + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.22);
+
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.23);
+        osc.addEventListener("ended", () => ctx.close());
+      } catch (error) {
+        console.warn("Draft sound unavailable:", error);
+      }
+    }
+
+    function renderDraftTools() {
+      const favoriteButton = document.getElementById("favoritesOnlyButton");
+      if (favoriteButton) {
+        favoriteButton.textContent = favoritesOnly ? "★ Favorites Only" : "☆ Favorites Only";
+        favoriteButton.classList.toggle("filter-active", favoritesOnly);
+      }
+
+      const soundButton = document.getElementById("draftSoundButton");
+      if (soundButton) {
+        soundButton.textContent = draftSoundEnabled ? "🔊 Draft Sound" : "🔇 Draft Sound";
+        soundButton.classList.toggle("filter-active", draftSoundEnabled);
+      }
+    }
+
+    function renderUpcomingPicks() {
+      const holder = document.getElementById("upcomingPicks");
+      if (!holder) return;
+
+      const order = getDraftOrder();
+      const index = state.currentPickIndex[state.activeDraft];
+      const upcoming = order.slice(index + 1, index + 5);
+
+      if (!upcoming.length) {
+        holder.innerHTML = "";
+        return;
+      }
+
+      holder.innerHTML = upcoming.map((slot, offset) => `
+        <div class="upcoming-chip">
+          <span>${offset === 0 ? "Next" : `+${offset + 1}`} · Pick #${slot.pickNumber}</span>
+          <strong>${escapeHtml(slot.owner)}</strong>
+        </div>
+      `).join("");
+    }
+
+    function renderMyRoster() {
+      const list = document.getElementById("myRosterList");
+      const count = document.getElementById("myRosterCount");
+      if (!list || !count) return;
+
+      const owner = state.signedInOwner;
+      const picks = state.picks
+        .filter(p => p.owner === owner && p.group === state.activeDraft)
+        .sort((a, b) => a.pickNumber - b.pickNumber);
+
+      count.textContent = `${picks.length} pick${picks.length === 1 ? "" : "s"}`;
+
+      if (!picks.length) {
+        list.innerHTML = `<div class="empty">You have not drafted anyone in the ${escapeHtml(state.activeDraft)} draft yet.</div>`;
+        return;
+      }
+
+      const sports = Object.keys(state.rosterRequirements[state.activeDraft] || {});
+      list.innerHTML = sports.map(sport => {
+        const sportPicks = picks.filter(p => p.sport === sport);
+        const required = Number(state.rosterRequirements[state.activeDraft]?.[sport] || 0);
+        const maximum = Number(state.sportMaximums?.[state.activeDraft]?.[sport] || 1);
+
+        if (!sportPicks.length) {
+          return `
+            <div class="roster-sport">
+              <div class="roster-sport-header">
+                <strong>${escapeHtml(sport)}</strong>
+                <span class="draft-meta">0 / ${maximum}</span>
+              </div>
+              <div class="draft-meta">${required > 0 ? `${required} required` : "Optional"}</div>
+            </div>
+          `;
+        }
+
+        return `
+          <div class="roster-sport">
+            <div class="roster-sport-header">
+              <strong>${escapeHtml(sport)}</strong>
+              <span class="draft-meta">${sportPicks.length} / ${maximum}</span>
+            </div>
+            ${sportPicks.map(p => `
+              <div class="roster-pick">
+                <strong>${escapeHtml(p.name)}</strong>
+                <span>#${p.pickNumber}${p.isFlex ? " · Flex" : ""}</span>
+              </div>
+            `).join("")}
+          </div>
+        `;
+      }).join("");
+    }
+
     function syncCommissionerControls() {
       document.getElementById("collegeFlexInput").value = state.flexCounts.College;
       document.getElementById("professionalFlexInput").value = state.flexCounts.Professional;
@@ -2961,8 +3216,10 @@ Atlanta Braves"></textarea>
       renderDraftOrder();
       renderRequirements();
       renderAvailable();
+      renderMyRoster();
       renderHistory();
       syncCommissionerControls();
+      renderDraftTools();
       renderTimer();
     }
 
@@ -3013,6 +3270,18 @@ Atlanta Braves"></textarea>
     );
 
     document.getElementById("requirementOwnerSelector").addEventListener("change", renderRequirements);
+
+    document.getElementById("favoritesOnlyButton").addEventListener("click", () => {
+      favoritesOnly = !favoritesOnly;
+      renderAvailable();
+    });
+
+    document.getElementById("draftSoundButton").addEventListener("click", () => {
+      draftSoundEnabled = !draftSoundEnabled;
+      localStorage.setItem("omniDraftSoundEnabled", String(draftSoundEnabled));
+      renderDraftTools();
+      if (draftSoundEnabled) playDraftSound();
+    });
 
     document.getElementById("draftTypeSelector").addEventListener("change", async event => {
       state.activeDraft = event.target.value;
