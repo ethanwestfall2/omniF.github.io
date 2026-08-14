@@ -1175,8 +1175,20 @@ Atlanta Braves"></textarea>
             const select = card.querySelector(".join-owner");
             const button = card.querySelector(".join-league");
             select.innerHTML = players.map(player => `
-              <option value="${player.player_id}" ${player.is_signed_in ? "disabled" : ""}>
-                ${escapeHtml(player.display_name)}${player.is_commissioner ? " (Commissioner)" : ""}${player.is_signed_in ? " — signed in" : ""}
+              <option
+                value="${player.player_id}"
+                data-player-name="${escapeHtml(player.display_name)}"
+                data-signed-in="${player.is_signed_in ? "true" : "false"}"
+                data-commissioner="${player.is_commissioner ? "true" : "false"}"
+                ${player.is_signed_in && player.is_commissioner ? "disabled" : ""}
+              >
+                ${escapeHtml(player.display_name)}
+                ${player.is_commissioner ? " (Commissioner)" : ""}
+                ${player.is_signed_in
+                  ? player.is_commissioner
+                    ? " — signed in / locked"
+                    : " — signed in / takeover available"
+                  : ""}
               </option>`).join("") || '<option value="">No players available</option>';
             select.disabled = players.length === 0;
             button.disabled = players.length === 0;
@@ -1189,17 +1201,72 @@ Atlanta Braves"></textarea>
         results.querySelectorAll(".join-league").forEach(button => {
           button.addEventListener("click", async () => {
             const card = button.closest(".league-result");
-            const playerId = card.querySelector(".join-owner").value;
+            const select = card.querySelector(".join-owner");
+            const selectedOption = select.options[select.selectedIndex];
+            const playerId = select.value;
+            const playerName = selectedOption?.dataset.playerName || selectedOption?.textContent?.trim() || "Player";
+            const isSignedIn = selectedOption?.dataset.signedIn === "true";
+            const isCommissioner = selectedOption?.dataset.commissioner === "true";
             const password = card.querySelector(".join-password").value;
-            if (!playerId) return toast("Choose an available player.", "error");
+
+            if (!playerId) return toast("Choose a player.", "error");
             if (!password) return toast("Enter the league password.", "error");
 
+            if (isSignedIn && isCommissioner) {
+              return toast("The commissioner/host session cannot be taken over.", "error");
+            }
+
             button.disabled = true;
-            button.textContent = "Joining...";
+            button.textContent = isSignedIn ? "Checking..." : "Joining...";
+
             try {
-              const data = await joinLeague(card.dataset.leagueId, playerId, password);
+              let data;
+
+              if (isSignedIn) {
+                const takeOver = confirm(
+                  `${playerName} is already signed in.\n\n` +
+                  `Choose OK to take over this session, or Cancel to leave the existing session active.`
+                );
+
+                if (!takeOver) {
+                  button.disabled = false;
+                  button.textContent = "Join As";
+                  return;
+                }
+
+                const takeoverPassword = prompt(
+                  `Re-enter the league password to take over ${playerName}'s session.`
+                );
+
+                if (takeoverPassword === null) {
+                  button.disabled = false;
+                  button.textContent = "Join As";
+                  return;
+                }
+
+                if (!takeoverPassword) {
+                  button.disabled = false;
+                  button.textContent = "Join As";
+                  return toast("League password is required to take over a session.", "error");
+                }
+
+                button.textContent = "Taking Over...";
+                data = await takeOverLeagueSession(
+                  card.dataset.leagueId,
+                  playerId,
+                  takeoverPassword
+                );
+              } else {
+                data = await joinLeague(card.dataset.leagueId, playerId, password);
+              }
+
               await enterLeagueFromSession(getStoredSession());
-              toast(`Joined ${data.league.name} as ${data.player.display_name}.`);
+
+              toast(
+                isSignedIn
+                  ? `Session taken over. Joined ${data.league.name} as ${data.player.display_name}.`
+                  : `Joined ${data.league.name} as ${data.player.display_name}.`
+              );
             } catch (error) {
               toast(error.message || "Unable to join league.", "error");
               button.disabled = false;
@@ -1311,6 +1378,30 @@ Atlanta Braves"></textarea>
       return data;
     }
 
+    async function takeOverLeagueSession(leagueId, playerId, password) {
+      const { data, error } = await supabaseClient.rpc(
+        "take_over_omni_session",
+        {
+          p_league_id: leagueId,
+          p_player_id: playerId,
+          p_password: password
+        }
+      );
+
+      if (error) throw new Error(error.message);
+
+      localStorage.setItem("omniSession", JSON.stringify({
+        leagueId: data.league.id,
+        leagueName: data.league.name,
+        playerId: data.player.id,
+        playerName: data.player.display_name,
+        isCommissioner: data.player.is_commissioner,
+        sessionToken: data.session_token
+      }));
+
+      return data;
+    }
+
     function readPresence() {
       try { return JSON.parse(localStorage.getItem(presenceKey()) || "{}"); }
       catch { return {}; }
@@ -1381,6 +1472,29 @@ Atlanta Braves"></textarea>
         });
         if (error || data !== true) {
           console.error("Session heartbeat failed.", error);
+
+          if (heartbeatInterval) {
+            clearInterval(heartbeatInterval);
+            heartbeatInterval = null;
+          }
+
+          if (sharedRefreshInterval) {
+            clearInterval(sharedRefreshInterval);
+            sharedRefreshInterval = null;
+          }
+
+          await stopRealtimeSync();
+
+          localStorage.removeItem("omniSession");
+          currentLeagueId = "";
+          state = defaultState();
+
+          toast(
+            "This player session is no longer active. It may have been taken over on another device.",
+            "error"
+          );
+
+          await showLeagueGate();
         }
       };
 
