@@ -1129,6 +1129,47 @@ Atlanta Braves"></textarea>
     </form>
   </dialog>
 
+
+  <dialog id="overridePickDialog">
+    <form id="overridePickForm">
+      <div class="modal-header">
+        <h2>Override Draft Pick</h2>
+        <button type="button" class="btn btn-small" id="closeOverridePickDialog">✕</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="overridePickId" />
+
+        <div id="overridePickSummary" class="current-turn-banner" style="margin-bottom:14px"></div>
+
+        <div class="form-grid">
+          <div class="form-field full">
+            <label for="overrideEntrySearch">Find replacement</label>
+            <input
+              id="overrideEntrySearch"
+              type="search"
+              placeholder="Search by team, player, driver, golfer, or sport..."
+            />
+          </div>
+
+          <div class="form-field full">
+            <label for="overrideEntrySelect">Replacement entry *</label>
+            <select id="overrideEntrySelect" size="10" required></select>
+          </div>
+        </div>
+
+        <div class="draft-meta" style="margin-top:10px">
+          Only currently available entries from the same College/Professional draft are shown.
+          The pick number, player, and round will not change.
+        </div>
+
+        <div class="modal-actions">
+          <button type="button" class="btn" id="cancelOverridePick">Cancel</button>
+          <button type="submit" class="btn btn-warning">Override Pick</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
   <div id="toastContainer" class="toast-container"></div>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -2247,6 +2288,7 @@ Atlanta Braves"></textarea>
     function renderHistory() {
       const picks = [...getDraftPicks()].sort((a, b) => b.pickNumber - a.pickNumber);
       const history = document.getElementById("historyList");
+      const isCommissioner = requireCommissionerSilent();
 
       if (!picks.length) {
         history.innerHTML = `<div class="empty">No selections have been made in this draft.</div>`;
@@ -2258,9 +2300,18 @@ Atlanta Braves"></textarea>
           <div class="pick-number">#${pick.pickNumber}</div>
           <div>
             <strong>${escapeHtml(pick.owner)} — ${escapeHtml(pick.name)}</strong>
-            <div class="draft-meta">Round ${pick.round} · ${escapeHtml(pick.sport)}${pick.isFlex ? " · Flex pick" : ""}</div>
+            <div class="draft-meta">
+              Round ${pick.round} · ${escapeHtml(pick.sport)}
+              ${pick.isFlex ? " · Flex pick" : ""}
+              ${pick.isAuto ? " · Autodraft" : ""}
+            </div>
           </div>
-          <span class="sport-badge">${escapeHtml(pick.sport)}</span>
+          <div class="available-actions">
+            <span class="sport-badge">${escapeHtml(pick.sport)}</span>
+            ${isCommissioner
+              ? `<button class="btn btn-small btn-warning" type="button" onclick="openOverridePick('${pick.id}')">Override</button>`
+              : ""}
+          </div>
         </div>
       `).join("");
     }
@@ -2532,6 +2583,7 @@ Atlanta Braves"></textarea>
     let lastObservedPickCount = null;
     let draftOrderEditorIds = [];
     let draftOrderDirty = false;
+    let overridePickId = "";
 
     function sessionInfo() {
       return getStoredSession();
@@ -3413,6 +3465,115 @@ Atlanta Braves"></textarea>
     }
 
 
+
+    function openOverridePick(pickId) {
+      if (!requireCommissioner()) return;
+
+      const pick = state.picks.find(item => item.id === pickId);
+      if (!pick) return toast("Draft pick not found.", "error");
+
+      overridePickId = pickId;
+      document.getElementById("overridePickId").value = pickId;
+      document.getElementById("overrideEntrySearch").value = "";
+
+      document.getElementById("overridePickSummary").innerHTML = `
+        <strong>Pick #${pick.pickNumber} — ${escapeHtml(pick.owner)}</strong>
+        <span>
+          Current selection: ${escapeHtml(pick.name)} (${escapeHtml(pick.sport)}) ·
+          ${escapeHtml(pick.group)} Draft
+        </span>
+      `;
+
+      populateOverrideEntryOptions();
+      document.getElementById("overridePickDialog").showModal();
+    }
+    window.openOverridePick = openOverridePick;
+
+    function populateOverrideEntryOptions() {
+      const pick = state.picks.find(item => item.id === overridePickId);
+      const select = document.getElementById("overrideEntrySelect");
+      if (!pick || !select) return;
+
+      const query = (
+        document.getElementById("overrideEntrySearch")?.value || ""
+      ).trim().toLowerCase();
+
+      const options = state.entries
+        .filter(entry =>
+          entry.group === pick.group &&
+          entry.active &&
+          !entry.draftedBy &&
+          entry.id !== pick.entryId &&
+          (
+            !query ||
+            `${entry.name} ${entry.sport} ${entry.type}`.toLowerCase().includes(query)
+          )
+        )
+        .sort((a, b) =>
+          a.sport.localeCompare(b.sport) ||
+          (Number(a.ranking) || 9999) - (Number(b.ranking) || 9999) ||
+          a.name.localeCompare(b.name)
+        );
+
+      select.innerHTML = options.map(entry => `
+        <option value="${entry.id}">
+          ${escapeHtml(entry.sport)} — ${escapeHtml(entry.name)}
+          ${entry.ranking ? ` (#${entry.ranking})` : ""}
+        </option>
+      `).join("");
+
+      if (!options.length) {
+        select.innerHTML = `<option value="" disabled>No available replacements match this search</option>`;
+      }
+    }
+
+    async function submitOverridePick(event) {
+      event.preventDefault();
+      if (!requireCommissioner()) return;
+
+      const session = sessionInfo();
+      const pickId = document.getElementById("overridePickId").value;
+      const entryId = document.getElementById("overrideEntrySelect").value;
+
+      if (!pickId || !entryId) {
+        return toast("Choose a replacement entry.", "error");
+      }
+
+      const pick = state.picks.find(item => item.id === pickId);
+      const replacementEntry = state.entries.find(item => item.id === entryId);
+
+      if (!pick || !replacementEntry) {
+        return toast("The pick or replacement could not be found.", "error");
+      }
+
+      const confirmed = confirm(
+        `Override Pick #${pick.pickNumber}?\\n\\n` +
+        `${pick.owner}: ${pick.name} (${pick.sport})\\n` +
+        `→ ${replacementEntry.name} (${replacementEntry.sport})\\n\\n` +
+        `The player, pick number, and round will stay the same.`
+      );
+
+      if (!confirmed) return;
+
+      const { error } = await supabaseClient.rpc(
+        "override_omni_draft_pick",
+        {
+          p_player_id: session.playerId,
+          p_session_token: session.sessionToken,
+          p_pick_id: pickId,
+          p_new_entry_id: entryId
+        }
+      );
+
+      if (error) return toast(error.message, "error");
+
+      document.getElementById("overridePickDialog").close();
+      overridePickId = "";
+
+      await refreshSharedState(true);
+      toast(`Pick #${pick.pickNumber} was overridden.`);
+    }
+
     const PLAYER_ROSTER_COLORS = [
       "#38bdf8", "#a78bfa", "#22c55e", "#f59e0b",
       "#f472b6", "#fb7185", "#2dd4bf", "#60a5fa",
@@ -3655,6 +3816,17 @@ Atlanta Braves"></textarea>
     document.getElementById("removePlayer").addEventListener("click", removePlayer);
     document.getElementById("saveDraftOrder").addEventListener("click", saveDraftOrderRemote);
     document.getElementById("rosterDraftFilter").addEventListener("change", renderAllRosters);
+
+    document.getElementById("overridePickForm").addEventListener("submit", submitOverridePick);
+    document.getElementById("overrideEntrySearch").addEventListener("input", populateOverrideEntryOptions);
+    document.getElementById("closeOverridePickDialog").addEventListener("click", () => {
+      document.getElementById("overridePickDialog").close();
+      overridePickId = "";
+    });
+    document.getElementById("cancelOverridePick").addEventListener("click", () => {
+      document.getElementById("overridePickDialog").close();
+      overridePickId = "";
+    });
 
     ["manualDraftSeconds","autoDraftSeconds","collegeFlexInput","professionalFlexInput"].forEach(id => {
       document.getElementById(id).addEventListener("change", saveLeagueSettings);
