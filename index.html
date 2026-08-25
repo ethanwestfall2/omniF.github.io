@@ -1009,8 +1009,12 @@
                 <div>
                   <label>Manual draft order</label>
                   <div class="draft-meta" style="margin-top:4px">
-                    This order is used for both College and Professional snake drafts.
+                    College and Professional drafts can use different orders.
                   </div>
+                  <select id="draftOrderGroupSelect" style="margin-top:8px">
+                    <option value="Professional">Professional Draft</option>
+                    <option value="College">College Draft</option>
+                  </select>
                   <div id="draftOrderEditor" class="draft-order-editor"></div>
                   <button class="btn" id="saveDraftOrder" type="button" style="margin-top:8px">
                     Save Draft Order
@@ -2583,6 +2587,11 @@ Atlanta Braves"></textarea>
     let lastObservedPickCount = null;
     let draftOrderEditorIds = [];
     let draftOrderDirty = false;
+    let draftOrderEditorGroup = "Professional";
+    let remoteDraftOrderIds = {
+      College: [],
+      Professional: []
+    };
     let overridePickId = "";
 
     function sessionInfo() {
@@ -2619,19 +2628,24 @@ Atlanta Braves"></textarea>
       const session = sessionInfo();
       if (!session) throw new Error("No active Omni session.");
 
-      const [{ data, error }, players] = await Promise.all([
+      const [{ data, error }, players, { data: draftOrders, error: draftOrderError }] = await Promise.all([
         supabaseClient.rpc("get_omni_league_state", {
           p_player_id: session.playerId,
           p_session_token: session.sessionToken
         }),
-        getLeaguePlayers(session.leagueId)
+        getLeaguePlayers(session.leagueId),
+        supabaseClient.rpc("get_omni_draft_orders", {
+          p_player_id: session.playerId,
+          p_session_token: session.sessionToken
+        })
       ]);
 
       if (error) throw new Error(error.message);
-      return { data, players };
+      if (draftOrderError) throw new Error(draftOrderError.message);
+      return { data, players, draftOrders: draftOrders || [] };
     }
 
-    function applySharedLeagueState(payload, playersPresence) {
+    function applySharedLeagueState(payload, playersPresence, draftOrdersPayload = []) {
       const session = sessionInfo();
       if (!session || !payload) return;
 
@@ -2659,6 +2673,19 @@ Atlanta Braves"></textarea>
         remoteDraftByGroup[draft.draft_group] = draft;
       });
 
+      remoteDraftOrderIds = {
+        College: [],
+        Professional: []
+      };
+
+      (draftOrdersPayload || [])
+        .sort((a,b) => Number(a.draft_position) - Number(b.draft_position))
+        .forEach(item => {
+          if (remoteDraftOrderIds[item.draft_group]) {
+            remoteDraftOrderIds[item.draft_group].push(item.player_id);
+          }
+        });
+
       const currentActiveDraft = state?.activeDraft || "Professional";
       const next = defaultState();
       next.activeDraft = currentActiveDraft;
@@ -2670,6 +2697,24 @@ Atlanta Braves"></textarea>
           a.display_name.localeCompare(b.display_name)
         )
         .map(p => p.display_name);
+
+      next.draftOrders = {
+        College: remoteDraftOrderIds.College
+          .map(id => remotePlayerById[id]?.display_name)
+          .filter(Boolean),
+        Professional: remoteDraftOrderIds.Professional
+          .map(id => remotePlayerById[id]?.display_name)
+          .filter(Boolean)
+      };
+
+      // Safety fallback for a newly-added player or an older league that
+      // has not yet populated one of the independent order lists.
+      ["College", "Professional"].forEach(group => {
+        const existing = new Set(next.draftOrders[group]);
+        next.owners.forEach(owner => {
+          if (!existing.has(owner)) next.draftOrders[group].push(owner);
+        });
+      });
 
       const commissioner = (payload.players || []).find(p => p.is_commissioner && p.active);
       next.commissioner = commissioner?.display_name || "";
@@ -2755,10 +2800,15 @@ Atlanta Braves"></textarea>
         .reduce((sum, count) => sum + Number(count || 0), 0);
       const rounds = requiredRounds + Number(sourceState.flexCounts[group] || 0);
       const order = [];
+      const baseOwners =
+        sourceState.draftOrders?.[group]?.length
+          ? sourceState.draftOrders[group]
+          : sourceState.owners;
+
       for (let round = 1; round <= rounds; round++) {
         const owners = round % 2 === 1
-          ? sourceState.owners
-          : [...sourceState.owners].reverse();
+          ? baseOwners
+          : [...baseOwners].reverse();
         owners.forEach(owner => order.push({
           owner,
           round,
@@ -2776,12 +2826,13 @@ Atlanta Braves"></textarea>
       if (sharedRefreshInFlight || !sessionInfo()) return;
       sharedRefreshInFlight = true;
       try {
-        const { data, players } = await fetchSharedLeagueState();
+        const { data, players, draftOrders } = await fetchSharedLeagueState();
         const signature = JSON.stringify({
           data,
+          draftOrders,
           presence: players.map(p => [p.player_id, p.is_signed_in])
         });
-        applySharedLeagueState(data, players);
+        applySharedLeagueState(data, players, draftOrders);
 
         const currentPickCount = state.picks.length;
         if (
@@ -3582,26 +3633,43 @@ Atlanta Braves"></textarea>
 
     function renderDraftOrderEditor(forceReset = false) {
       const holder = document.getElementById("draftOrderEditor");
-      if (!holder) return;
+      const groupSelect = document.getElementById("draftOrderGroupSelect");
+      if (!holder || !groupSelect) return;
 
-      const activePlayers = Object.values(remotePlayerById || {})
+      draftOrderEditorGroup = groupSelect.value || draftOrderEditorGroup || "Professional";
+
+      const activeIds = (remoteDraftOrderIds[draftOrderEditorGroup] || [])
+        .filter(id => remotePlayerById[id]?.active);
+
+      // Append any active players that are not yet in this draft's order.
+      Object.values(remotePlayerById || {})
         .filter(player => player.active)
         .sort((a,b) =>
           (Number(a.draft_position) || 9999) - (Number(b.draft_position) || 9999) ||
           a.display_name.localeCompare(b.display_name)
-        );
+        )
+        .forEach(player => {
+          if (!activeIds.includes(player.id)) activeIds.push(player.id);
+        });
 
-      const activeIds = activePlayers.map(player => player.id);
       const sameSet =
         draftOrderEditorIds.length === activeIds.length &&
         draftOrderEditorIds.every(id => activeIds.includes(id));
 
       if (forceReset || !draftOrderDirty || !sameSet) {
-        draftOrderEditorIds = activeIds;
+        draftOrderEditorIds = [...activeIds];
         draftOrderDirty = false;
       }
 
-      holder.innerHTML = draftOrderEditorIds.map((playerId, index) => {
+      const draft = remoteDraftByGroup[draftOrderEditorGroup];
+      const hasPicks = state.picks.some(p => p.group === draftOrderEditorGroup);
+      const label = draftOrderEditorGroup === "College" ? "College" : "Professional";
+
+      holder.innerHTML = `
+        <div class="draft-meta" style="margin-bottom:2px">
+          ${label} order${hasPicks ? " · locked because this draft already has picks" : ""}
+        </div>
+      ` + draftOrderEditorIds.map((playerId, index) => {
         const player = remotePlayerById[playerId];
         if (!player) return "";
         return `
@@ -3612,23 +3680,28 @@ Atlanta Braves"></textarea>
               class="btn btn-small"
               type="button"
               onclick="moveDraftOrderPlayer('${playerId}', -1)"
-              ${index === 0 ? "disabled" : ""}
+              ${index === 0 || hasPicks ? "disabled" : ""}
               title="Move up"
             >↑</button>
             <button
               class="btn btn-small"
               type="button"
               onclick="moveDraftOrderPlayer('${playerId}', 1)"
-              ${index === draftOrderEditorIds.length - 1 ? "disabled" : ""}
+              ${index === draftOrderEditorIds.length - 1 || hasPicks ? "disabled" : ""}
               title="Move down"
             >↓</button>
           </div>
         `;
       }).join("");
+
+      document.getElementById("saveDraftOrder").disabled =
+        !requireCommissionerSilent() || hasPicks;
     }
 
     function moveDraftOrderPlayer(playerId, direction) {
       if (!requireCommissionerSilent()) return;
+      if (state.picks.some(p => p.group === draftOrderEditorGroup)) return;
+
       const index = draftOrderEditorIds.indexOf(playerId);
       const nextIndex = index + direction;
       if (index < 0 || nextIndex < 0 || nextIndex >= draftOrderEditorIds.length) return;
@@ -3643,11 +3716,20 @@ Atlanta Braves"></textarea>
 
     async function saveDraftOrderRemote() {
       if (!requireCommissioner()) return;
+
+      if (state.picks.some(p => p.group === draftOrderEditorGroup)) {
+        return toast(
+          `${draftOrderEditorGroup} draft order cannot be changed after that draft has picks. Reset that draft first.`,
+          "error"
+        );
+      }
+
       const session = sessionInfo();
 
       const { error } = await supabaseClient.rpc("set_omni_draft_order", {
         p_player_id: session.playerId,
         p_session_token: session.sessionToken,
+        p_draft_group: draftOrderEditorGroup,
         p_order: draftOrderEditorIds
       });
 
@@ -3656,7 +3738,7 @@ Atlanta Braves"></textarea>
       draftOrderDirty = false;
       await refreshSharedState(true);
       renderDraftOrderEditor(true);
-      toast("Draft order saved.");
+      toast(`${draftOrderEditorGroup} draft order saved.`);
     }
 
     function renderAllRosters() {
@@ -3815,6 +3897,11 @@ Atlanta Braves"></textarea>
     document.getElementById("addPlayer").addEventListener("click", addPlayer);
     document.getElementById("removePlayer").addEventListener("click", removePlayer);
     document.getElementById("saveDraftOrder").addEventListener("click", saveDraftOrderRemote);
+    document.getElementById("draftOrderGroupSelect").addEventListener("change", event => {
+      draftOrderEditorGroup = event.target.value;
+      draftOrderDirty = false;
+      renderDraftOrderEditor(true);
+    });
     document.getElementById("rosterDraftFilter").addEventListener("change", renderAllRosters);
 
     document.getElementById("overridePickForm").addEventListener("submit", submitOverridePick);
