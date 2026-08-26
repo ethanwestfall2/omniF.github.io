@@ -182,7 +182,7 @@
 
     .league-board {
       width: 100%;
-      min-width: 900px;
+      min-width: 820px;
       border-collapse: separate;
       border-spacing: 0;
       table-layout: fixed;
@@ -207,9 +207,9 @@
       z-index: 5;
       background: #f8fafc;
       color: #0f172a;
-      padding: 10px 8px;
+      padding: 7px 6px;
       text-align: center;
-      font-size: .82rem;
+      font-size: .78rem;
       font-weight: 900;
       letter-spacing: 0;
       text-transform: none;
@@ -240,9 +240,9 @@
     }
 
     .league-board-cell {
-      min-width: 145px;
-      height: 58px;
-      padding: 7px 9px;
+      min-width: 132px;
+      height: 34px;
+      padding: 4px 7px;
       vertical-align: middle;
       background: #ffffff;
       color: #111827;
@@ -265,7 +265,8 @@
     .board-team-name {
       display: block;
       font-weight: 800;
-      line-height: 1.15;
+      font-size: .82rem;
+      line-height: 1.05;
       word-break: break-word;
     }
 
@@ -2530,31 +2531,6 @@ Atlanta Braves"></textarea>
           table += `
             <td class="league-board-cell ${taken ? "taken" : ""}">
               <span class="board-team-name">${escapeHtml(entry.name)}</span>
-
-              ${taken
-                ? `
-                  <span class="board-team-meta">
-                    Drafted by ${escapeHtml(draftedBy)}
-                    ${pickNumber ? ` · Pick #${pickNumber}` : ""}
-                  </span>
-                  ${isCommissioner && pick
-                    ? `
-                      <div class="board-cell-actions">
-                        <span class="board-team-meta" style="margin:0">Rank #${ranking}</span>
-                        <button
-                          class="board-override-btn"
-                          type="button"
-                          onclick="openOverridePick('${pick.id}')"
-                        >Override</button>
-                      </div>
-                    `
-                    : ""
-                  }
-                `
-                : `
-                  <span class="board-team-meta">Rank #${ranking} · Available</span>
-                `
-              }
             </td>
           `;
         });
