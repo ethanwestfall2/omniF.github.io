@@ -171,6 +171,158 @@
     .history-card { grid-column: span 8; }
     .commissioner-card { grid-column: span 4; }
 
+    .league-board-wrap {
+      width: 100%;
+      overflow: auto;
+      max-height: 620px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #e5e7eb;
+    }
+
+    .league-board {
+      width: 100%;
+      min-width: 900px;
+      border-collapse: separate;
+      border-spacing: 0;
+      table-layout: fixed;
+      color: #111827;
+      background: #ffffff;
+    }
+
+    .league-board th,
+    .league-board td {
+      border-right: 1px solid #cbd5e1;
+      border-bottom: 1px solid #cbd5e1;
+    }
+
+    .league-board th:last-child,
+    .league-board td:last-child {
+      border-right: 0;
+    }
+
+    .league-board thead th {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      background: #f8fafc;
+      color: #0f172a;
+      padding: 10px 8px;
+      text-align: center;
+      font-size: .82rem;
+      font-weight: 900;
+      letter-spacing: 0;
+      text-transform: none;
+      white-space: nowrap;
+    }
+
+    .league-board .board-rank-header,
+    .league-board .board-rank {
+      position: sticky;
+      left: 0;
+      z-index: 4;
+      width: 48px;
+      min-width: 48px;
+      max-width: 48px;
+      text-align: center;
+      font-weight: 900;
+    }
+
+    .league-board .board-rank-header {
+      z-index: 7;
+      background: #e2e8f0;
+    }
+
+    .league-board .board-rank {
+      background: #f1f5f9;
+      color: #475569;
+      padding: 9px 5px;
+    }
+
+    .league-board-cell {
+      min-width: 145px;
+      height: 58px;
+      padding: 7px 9px;
+      vertical-align: middle;
+      background: #ffffff;
+      color: #111827;
+      transition: filter .15s ease;
+    }
+
+    .league-board-cell:hover {
+      filter: brightness(.97);
+    }
+
+    .league-board-cell.taken {
+      background: #ef4444;
+      color: #111827;
+    }
+
+    .league-board-cell.empty-cell {
+      background: #f8fafc;
+    }
+
+    .board-team-name {
+      display: block;
+      font-weight: 800;
+      line-height: 1.15;
+      word-break: break-word;
+    }
+
+    .board-team-meta {
+      display: block;
+      margin-top: 4px;
+      font-size: .67rem;
+      line-height: 1.15;
+      opacity: .8;
+    }
+
+    .board-cell-actions {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 5px;
+      margin-top: 5px;
+    }
+
+    .board-override-btn {
+      padding: 3px 6px;
+      font-size: .64rem;
+      border-radius: 6px;
+      border: 1px solid rgba(15,23,42,.35);
+      background: rgba(255,255,255,.65);
+      color: #111827;
+      font-weight: 900;
+    }
+
+    .board-legend {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-size: .78rem;
+    }
+
+    .board-legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .board-legend-swatch {
+      width: 14px;
+      height: 14px;
+      border-radius: 3px;
+      border: 1px solid #94a3b8;
+      background: #ffffff;
+    }
+
+    .board-legend-swatch.taken {
+      background: #ef4444;
+      border-color: #dc2626;
+    }
+
     .toolbar {
       display: grid;
       grid-template-columns: 1.4fr 1fr 1fr;
@@ -952,11 +1104,23 @@
 
           <div class="card history-card">
             <div class="card-header">
-              <h3>Draft History</h3>
+              <div>
+                <h3 id="leagueBoardTitle">Draft Board by Sport</h3>
+                <div class="board-legend" style="margin-top:7px">
+                  <span class="board-legend-item">
+                    <span class="board-legend-swatch taken"></span>
+                    Drafted
+                  </span>
+                  <span class="board-legend-item">
+                    <span class="board-legend-swatch"></span>
+                    Available
+                  </span>
+                </div>
+              </div>
               <button class="btn btn-warning" id="undoLastPick">Undo Last Pick</button>
             </div>
             <div class="card-body">
-              <div id="historyList" class="history-list"></div>
+              <div id="historyList" class="league-board-wrap"></div>
             </div>
           </div>
 
@@ -2290,34 +2454,116 @@ Atlanta Braves"></textarea>
     }
 
     function renderHistory() {
-      const picks = [...getDraftPicks()].sort((a, b) => b.pickNumber - a.pickNumber);
-      const history = document.getElementById("historyList");
-      const isCommissioner = requireCommissionerSilent();
+      const holder = document.getElementById("historyList");
+      const title = document.getElementById("leagueBoardTitle");
+      if (!holder) return;
 
-      if (!picks.length) {
-        history.innerHTML = `<div class="empty">No selections have been made in this draft.</div>`;
+      const group = state.activeDraft;
+      if (title) title.textContent = `${group} Draft Board by Sport`;
+
+      const sports = SPORTS
+        .filter(sport => sport.group === group)
+        .map(sport => sport.name);
+
+      const entriesBySport = {};
+
+      sports.forEach(sport => {
+        entriesBySport[sport] = state.entries
+          .filter(entry =>
+            entry.group === group &&
+            entry.sport === sport &&
+            entry.active
+          )
+          .sort((a, b) =>
+            (Number(a.ranking) || 999999) - (Number(b.ranking) || 999999) ||
+            a.name.localeCompare(b.name)
+          );
+      });
+
+      const maxRows = Math.max(
+        0,
+        ...sports.map(sport => entriesBySport[sport].length)
+      );
+
+      if (!sports.length || maxRows === 0) {
+        holder.innerHTML = `
+          <div class="empty" style="background:var(--panel-2);color:var(--muted)">
+            No ranked entries have been added for the ${escapeHtml(group)} draft yet.
+          </div>
+        `;
         return;
       }
 
-      history.innerHTML = picks.map(pick => `
-        <div class="history-row">
-          <div class="pick-number">#${pick.pickNumber}</div>
-          <div>
-            <strong>${escapeHtml(pick.owner)} — ${escapeHtml(pick.name)}</strong>
-            <div class="draft-meta">
-              Round ${pick.round} · ${escapeHtml(pick.sport)}
-              ${pick.isFlex ? " · Flex pick" : ""}
-              ${pick.isAuto ? " · Autodraft" : ""}
-            </div>
-          </div>
-          <div class="available-actions">
-            <span class="sport-badge">${escapeHtml(pick.sport)}</span>
-            ${isCommissioner
-              ? `<button class="btn btn-small btn-warning" type="button" onclick="openOverridePick('${pick.id}')">Override</button>`
-              : ""}
-          </div>
-        </div>
-      `).join("");
+      const isCommissioner = requireCommissionerSilent();
+
+      let table = `
+        <table class="league-board">
+          <thead>
+            <tr>
+              <th class="board-rank-header">#</th>
+              ${sports.map(sport => `<th>${escapeHtml(sport)}</th>`).join("")}
+            </tr>
+          </thead>
+          <tbody>
+      `;
+
+      for (let rowIndex = 0; rowIndex < maxRows; rowIndex++) {
+        table += `<tr><td class="board-rank">${rowIndex + 1}</td>`;
+
+        sports.forEach(sport => {
+          const entry = entriesBySport[sport][rowIndex];
+
+          if (!entry) {
+            table += `<td class="league-board-cell empty-cell"></td>`;
+            return;
+          }
+
+          const pick = entry.draftPickId
+            ? state.picks.find(item => item.id === entry.draftPickId)
+            : state.picks.find(item => item.entryId === entry.id && item.group === group);
+
+          const taken = Boolean(entry.draftedBy || pick);
+          const draftedBy = pick?.owner || entry.draftedBy || "";
+          const pickNumber = pick?.pickNumber || "";
+          const ranking = entry.ranking || rowIndex + 1;
+
+          table += `
+            <td class="league-board-cell ${taken ? "taken" : ""}">
+              <span class="board-team-name">${escapeHtml(entry.name)}</span>
+
+              ${taken
+                ? `
+                  <span class="board-team-meta">
+                    Drafted by ${escapeHtml(draftedBy)}
+                    ${pickNumber ? ` · Pick #${pickNumber}` : ""}
+                  </span>
+                  ${isCommissioner && pick
+                    ? `
+                      <div class="board-cell-actions">
+                        <span class="board-team-meta" style="margin:0">Rank #${ranking}</span>
+                        <button
+                          class="board-override-btn"
+                          type="button"
+                          onclick="openOverridePick('${pick.id}')"
+                        >Override</button>
+                      </div>
+                    `
+                    : ""
+                  }
+                `
+                : `
+                  <span class="board-team-meta">Rank #${ranking} · Available</span>
+                `
+              }
+            </td>
+          `;
+        });
+
+        table += `</tr>`;
+      }
+
+      table += `</tbody></table>`;
+      holder.innerHTML = table;
     }
 
     function syncCommissionerControls() {
